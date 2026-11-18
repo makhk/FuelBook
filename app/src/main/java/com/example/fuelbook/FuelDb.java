@@ -25,14 +25,33 @@ public final class FuelDb extends SQLiteOpenHelper {
             this.odometer = odometer; this.liters = liters; this.amount = amount; this.estimate = estimate;
         }
     }
+    public static final class Expense {
+        public long id, vehicleId, time;
+        public String title;
+        public double amount;
+        public String vehicleName;
+        Expense(long id, long vehicleId, String vehicleName, long time, String title, double amount) {
+            this.id = id; this.vehicleId = vehicleId; this.vehicleName = vehicleName;
+            this.time = time; this.title = title; this.amount = amount;
+        }
+    }
 
-    public FuelDb(Context context) { super(context, "fuelbook.db", null, 1); }
+    public FuelDb(Context context) { super(context, "fuelbook.db", null, 2); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE, estimate REAL NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE fills (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE, time INTEGER NOT NULL, odometer REAL NOT NULL, liters REAL NOT NULL, amount REAL NOT NULL, estimate REAL NOT NULL DEFAULT 0, UNIQUE(vehicle_id, odometer))");
         db.execSQL("CREATE INDEX fills_vehicle_odo ON fills(vehicle_id, odometer DESC)");
+        createExpensesTable(db);
     }
-    @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) { /* Schema v1 */ }
+    private void createExpensesTable(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE, time INTEGER NOT NULL, title TEXT NOT NULL, amount REAL NOT NULL)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS expenses_vehicle_time ON expenses(vehicle_id, time DESC)");
+    }
+    @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < 2) {
+            createExpensesTable(db);
+        }
+    }
     @Override public void onConfigure(SQLiteDatabase db) { super.onConfigure(db); db.setForeignKeyConstraintsEnabled(true); }
 
     public List<Vehicle> vehicles() {
@@ -87,4 +106,30 @@ public final class FuelDb extends SQLiteOpenHelper {
         return getWritableDatabase().insertOrThrow("fills", null, cv);
     }
     public void deleteFill(long id) { getWritableDatabase().delete("fills", "id=?", new String[]{String.valueOf(id)}); }
+
+    // Misc Expenses CRUD
+    public List<Expense> expenses(long vehicleId) {
+        List<Expense> out = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT e.id,e.vehicle_id,v.name,e.time,e.title,e.amount FROM expenses e JOIN vehicles v ON v.id=e.vehicle_id WHERE e.vehicle_id=? ORDER BY e.time DESC, e.id DESC", new String[]{String.valueOf(vehicleId)})) {
+            while (c.moveToNext()) out.add(readExpense(c));
+        }
+        return out;
+    }
+    public List<Expense> allExpenses() {
+        List<Expense> out = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT e.id,e.vehicle_id,v.name,e.time,e.title,e.amount FROM expenses e JOIN vehicles v ON v.id=e.vehicle_id ORDER BY v.name COLLATE NOCASE, e.time", null)) {
+            while (c.moveToNext()) out.add(readExpense(c));
+        }
+        return out;
+    }
+    private Expense readExpense(Cursor c) { return new Expense(c.getLong(0), c.getLong(1), c.getString(2), c.getLong(3), c.getString(4), c.getDouble(5)); }
+    public long addExpense(long vehicleId, long time, String title, double amount) {
+        ContentValues cv = new ContentValues();
+        cv.put("vehicle_id", vehicleId); cv.put("time", time);
+        cv.put("title", title); cv.put("amount", amount);
+        return getWritableDatabase().insertOrThrow("expenses", null, cv);
+    }
+    public void deleteExpense(long id) { getWritableDatabase().delete("expenses", "id=?", new String[]{String.valueOf(id)}); }
 }

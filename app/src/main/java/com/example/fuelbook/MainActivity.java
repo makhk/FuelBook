@@ -1,10 +1,8 @@
 package com.example.fuelbook;
 
-import android.webkit.WebView;
-import android.webkit.WebSettings;
-
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DatePickerDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -15,8 +13,10 @@ import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -25,15 +25,20 @@ import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.AdapterView;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
 import java.text.DecimalFormat;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
 
 public class MainActivity extends Activity {
     private static final int REQUEST_IMPORT = 501, REQUEST_EXPORT = 502;
@@ -42,8 +47,13 @@ public class MainActivity extends Activity {
     private boolean dark;
     private int bg, panel, primary, secondary, accent, tint, border, field;
     private long selectedVehicle = -1;
+    private int activeTab = 0; // 0 = Mileage & Fill-ups, 1 = Expenses
+    private long selectedFillDate = System.currentTimeMillis();
+    private long selectedExpenseDate = System.currentTimeMillis();
+
     private LinearLayout root;
     private EditText odoInput, litersInput, amountInput, estimateInput;
+    private EditText expTitleInput, expAmountInput;
     private final DecimalFormat fmt = new DecimalFormat("#,##0.##");
 
     @Override public void onCreate(Bundle state) {
@@ -102,9 +112,9 @@ public class MainActivity extends Activity {
         e.setPadding(d(14), 0, d(14), 0); e.setBackground(shape(field, 11, 0));
         e.setLayoutParams(lp(-1, 52)); return e;
     }
-    private EditText input(LinearLayout target, String label, String hint, String initial) {
+    private EditText input(LinearLayout target, String label, String hint, String initial, boolean numeric) {
         target.addView(text(label, 12, secondary, true)); addSpace(target, 7);
-        EditText e = edit(hint, initial, true); target.addView(e); addSpace(target, 14); return e;
+        EditText e = edit(hint, initial, numeric); target.addView(e); addSpace(target, 14); return e;
     }
     private double number(EditText e, String title, boolean zeroAllowed) {
         String s = e.getText().toString().trim();
@@ -123,6 +133,17 @@ public class MainActivity extends Activity {
         if (!vehicles.isEmpty()) { selectedVehicle = vehicles.get(0).id; prefs.edit().putLong("selected_vehicle", selectedVehicle).apply(); return vehicles.get(0); }
         selectedVehicle = -1; return null;
     }
+    private void pickDate(long initialMillis, OnDatePicked listener) {
+        Calendar cal = Calendar.getInstance();
+        cal.setTimeInMillis(initialMillis);
+        new DatePickerDialog(this, (view, year, month, dayOfMonth) -> {
+            Calendar chosen = Calendar.getInstance();
+            chosen.set(year, month, dayOfMonth, 12, 0, 0);
+            listener.onPicked(chosen.getTimeInMillis());
+        }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH)).show();
+    }
+    private interface OnDatePicked { void onPicked(long millis); }
+
     private void render() {
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setBackgroundColor(bg);
         root = col(); root.setPadding(d(18), d(22), d(18), d(36)); scroll.addView(root);
@@ -131,13 +152,17 @@ public class MainActivity extends Activity {
             return insets.consumeSystemWindowInsets();
         });
         setContentView(scroll);
+
+        // Header
         LinearLayout header = row(); root.addView(header, lp(-1, -2));
         LinearLayout names = col(); header.addView(names, new LinearLayout.LayoutParams(0, -2, 1));
         names.addView(text("Fuelbook", 28, primary, true)); addSpace(names, 5);
-        names.addView(text("Every fill-up, clearly tracked.", 13, secondary, false));
+        names.addView(text("Every fill-up & expense, clearly tracked.", 13, secondary, false));
         Button theme = button(dark ? "☀ Light" : "☾ Dark", false); header.addView(theme, lp(88, 44));
         theme.setOnClickListener(v -> { prefs.edit().putBoolean("dark", !dark).apply(); recreate(); });
-        addSpace(root, 26);
+        addSpace(root, 20);
+
+        // Vehicle Selector
         List<FuelDb.Vehicle> vehicles = db.vehicles();
         FuelDb.Vehicle current = selected(vehicles);
         LinearLayout selector = card(root);
@@ -167,14 +192,44 @@ public class MainActivity extends Activity {
             selector.addView(text("Add a vehicle to start logging fuel.", 14, secondary, false));
         }
         addSpace(root, 18);
-        if (current != null) { summary(current); entryForm(current); history(current); }
+
+        if (current != null) {
+            // Navigation Tabs: Mileage vs Expenses
+            LinearLayout tabBar = row();
+            tabBar.setPadding(d(4), d(4), d(4), d(4));
+            tabBar.setBackground(shape(panel, 14, border));
+            root.addView(tabBar, lp(-1, -2));
+
+            Button mileageTab = button("Mileage & Fill-ups", activeTab == 0);
+            Button expensesTab = button("Expenses", activeTab == 1);
+            LinearLayout.LayoutParams tLp1 = new LinearLayout.LayoutParams(0, d(44), 1); tLp1.setMargins(0, 0, d(4), 0);
+            LinearLayout.LayoutParams tLp2 = new LinearLayout.LayoutParams(0, d(44), 1); tLp2.setMargins(d(4), 0, 0, 0);
+            tabBar.addView(mileageTab, tLp1);
+            tabBar.addView(expensesTab, tLp2);
+
+            mileageTab.setOnClickListener(v -> { if (activeTab != 0) { activeTab = 0; render(); } });
+            expensesTab.setOnClickListener(v -> { if (activeTab != 1) { activeTab = 1; render(); } });
+            addSpace(root, 18);
+
+            if (activeTab == 0) {
+                mileageSummary(current);
+                entryForm(current);
+                history(current);
+            } else {
+                expensesTabView(current);
+            }
+        }
+
         addSpace(root, 14); filesCard();
         addSpace(root, 15);
         TextView foot = text("Mileage assumes a full tank at each fill-up.\nDistance since previous fill ÷ litres added now.", 12, secondary, false);
         foot.setGravity(Gravity.CENTER); foot.setLineSpacing(d(3), 1); root.addView(foot);
     }
 
-    private void summary(FuelDb.Vehicle vehicle) {
+    // ==========================================
+    // TAB 1: MILEAGE AT A GLANCE & FILL-UPS
+    // ==========================================
+    private void mileageSummary(FuelDb.Vehicle vehicle) {
         List<FuelDb.Fill> list = db.fills(vehicle.id);
         LinearLayout summary = card(root);
         summary.addView(text("MILEAGE AT A GLANCE", 12, secondary, true)); addSpace(summary, 12);
@@ -182,73 +237,44 @@ public class MainActivity extends Activity {
         if (list.size() < 2) {
             summary.addView(text("— km/L", 29, accent, true)); addSpace(summary, 5);
             summary.addView(text(list.isEmpty() ? "Log your first fill-up to get started." : "Add one more fill-up to calculate mileage.", 13, secondary, false));
-        } else {
-            FuelDb.Fill newer = list.get(0), older = list.get(1);
-            double distance = newer.odometer - older.odometer;
-            summary.addView(text(n(distance / newer.liters) + " km/L", 31, accent, true)); addSpace(summary, 5);
-            summary.addView(text(n(distance) + " km since last fill  ·  " + n(newer.liters) + " L added", 13, secondary, false));
-            if (newer.estimate > 0) {
-                addSpace(summary, 10);
-                double delta = (distance / newer.liters - newer.estimate) / newer.estimate * 100;
-                summary.addView(text("Vs estimate: " + (delta >= 0 ? "+" : "") + n(delta) + "%", 13, primary, true));
             addSpace(root, 18);
             return;
         }
 
-        // Calculate Overall Average & Totals (Chronological Order: oldest to newest)
-        List<FuelDb.Fill> sorted = new java.util.ArrayList<>(list);
-        java.util.Collections.reverse(sorted);
+        List<FuelDb.Fill> sorted = new ArrayList<>(list);
+        Collections.reverse(sorted); // chronological: oldest -> newest
 
         double totalDistance = 0;
         double totalFuel = 0;
-        double totalSpend = 0;
 
         StringBuilder datesJson = new StringBuilder("[");
         StringBuilder mileageJson = new StringBuilder("[");
-        StringBuilder expenseJson = new StringBuilder("[");
-        StringBuilder distanceJson = new StringBuilder("[");
-        StringBuilder fuelJson = new StringBuilder("[");
 
-        for (int i = 0; i < sorted.size(); i++) {
-            FuelDb.Fill f = sorted.get(i);
-            totalSpend += f.amount;
-            String shortDate = date(f.time);
+        for (int i = 1; i < sorted.size(); i++) {
+            FuelDb.Fill prev = sorted.get(i - 1);
+            FuelDb.Fill curr = sorted.get(i);
+            double dist = curr.odometer - prev.odometer;
+            if (dist > 0 && curr.liters > 0) {
+                totalDistance += dist;
+                totalFuel += curr.liters;
+                double kml = dist / curr.liters;
 
-            if (i > 0) {
-                FuelDb.Fill prev = sorted.get(i - 1);
-                double dist = f.odometer - prev.odometer;
-                if (dist > 0 && f.liters > 0) {
-                    totalDistance += dist;
-                    totalFuel += f.liters;
-                    double kml = dist / f.liters;
-
-                    if (datesJson.length() > 1) {
-                        datesJson.append(",");
-                        mileageJson.append(",");
-                        expenseJson.append(",");
-                        distanceJson.append(",");
-                        fuelJson.append(",");
-                    }
-                    datesJson.append("'").append(shortDate).append("'");
-                    mileageJson.append(String.format(Locale.US, "%.2f", kml));
-                    expenseJson.append(String.format(Locale.US, "%.2f", f.amount));
-                    distanceJson.append(String.format(Locale.US, "%.2f", dist));
-                    fuelJson.append(String.format(Locale.US, "%.2f", f.liters));
+                if (datesJson.length() > 1) {
+                    datesJson.append(",");
+                    mileageJson.append(",");
                 }
+                datesJson.append("'").append(date(curr.time)).append("'");
+                mileageJson.append(String.format(Locale.US, "%.2f", kml));
             }
         }
         datesJson.append("]");
         mileageJson.append("]");
-        expenseJson.append("]");
-        distanceJson.append("]");
-        fuelJson.append("]");
 
         double overallAvg = totalFuel > 0 ? totalDistance / totalFuel : 0;
 
-        // Hero Metric Display
         summary.addView(text(n(overallAvg) + " km/L", 31, accent, true)); addSpace(summary, 5);
-        summary.addView(text("Overall Avg  ·  " + n(totalDistance) + " km tracked  ·  ₹" + n(totalSpend) + " total spend", 13, secondary, false));
-        
+        summary.addView(text("Overall Average  ·  " + n(totalDistance) + " km tracked  ·  " + n(totalFuel) + " L fuel", 13, secondary, false));
+
         if (vehicle.estimate > 0) {
             addSpace(summary, 8);
             double delta = (overallAvg - vehicle.estimate) / vehicle.estimate * 100;
@@ -256,76 +282,65 @@ public class MainActivity extends Activity {
         }
 
         addSpace(summary, 16);
-        summary.addView(text("VISUALIZATIONS", 12, secondary, true)); addSpace(summary, 10);
+        summary.addView(text("MILEAGE TREND", 12, secondary, true)); addSpace(summary, 10);
 
-        // Interactive Chart WebView using Chart.js
         WebView chartWeb = new WebView(this);
-        chartWeb.setLayoutParams(lp(-1, 280));
+        chartWeb.setLayoutParams(lp(-1, 220));
         WebSettings settings = chartWeb.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
 
+        String bgHex = dark ? "#1B2225" : "#FFFFFF";
+        String txtHex = dark ? "#A2B1B4" : "#64777D";
+        String accHex = dark ? "#65DCC7" : "#0D796A";
+
         String html = "<!DOCTYPE html><html><head>" +
                 "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
                 "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>" +
-                "<style>" +
-                "body { background-color: " + (dark ? "#1B2225" : "#FFFFFF") + "; color: " + (dark ? "#F3F7F7" : "#162B30") + "; font-family: sans-serif; margin: 0; padding: 0; }" +
-                ".tabs { display: flex; gap: 6px; margin-bottom: 8px; justify-content: center; }" +
-                "button { background: " + (dark ? "#263034" : "#E7F6F1") + "; color: " + (dark ? "#65DCC7" : "#0D796A") + "; border: none; padding: 6px 10px; border-radius: 6px; font-size: 11px; font-weight: bold; cursor: pointer; }" +
-                "button.active { background: " + (dark ? "#65DCC7" : "#0D796A") + "; color: " + (dark ? "#09251E" : "#FFFFFF") + "; }" +
-                ".chart-container { position: relative; height: 210px; width: 100%; }" +
-                "</style></head><body>" +
-                "<div class='tabs'>" +
-                "<button id='btn1' class='active' onclick='showChart(\"mileage\")'>Mileage</button>" +
-                "<button id='btn2' onclick='showChart(\"expense\")'>Expenses</button>" +
-                "<button id='btn3' onclick='showChart(\"distance\")'>Distance & Fuel</button>" +
-                "</div>" +
-                "<div class='chart-container'><canvas id='myChart'></canvas></div>" +
-                "<script>" +
+                "<style>body { background-color: " + bgHex + "; margin: 0; padding: 0; } .box { position: relative; height: 210px; width: 100%; }</style>" +
+                "</head><body><div class='box'><canvas id='c'></canvas></div><script>" +
                 "const labels = " + datesJson.toString() + ";" +
-                "const mileageData = " + mileageJson.toString() + ";" +
-                "const expenseData = " + expenseJson.toString() + ";" +
-                "const distanceData = " + distanceJson.toString() + ";" +
-                "const fuelData = " + fuelJson.toString() + ";" +
-                "const textColor = '" + (dark ? "#A2B1B4" : "#64777D") + "';" +
-                "const accentColor = '" + (dark ? "#65DCC7" : "#0D796A") + "';" +
-                "let ctx = document.getElementById('myChart').getContext('2d');" +
-                "let currentChart = new Chart(ctx, {" +
+                "const data = " + mileageJson.toString() + ";" +
+                "const avgLine = labels.map(() => " + String.format(Locale.US, "%.2f", overallAvg) + ");" +
+                "new Chart(document.getElementById('c').getContext('2d'), {" +
                 "  type: 'line'," +
                 "  data: {" +
                 "    labels: labels," +
-                "    datasets: [{ label: 'Mileage (km/L)', data: mileageData, borderColor: accentColor, backgroundColor: accentColor, tension: 0.2, borderWidth: 2, pointRadius: 4 }]" +
+                "    datasets: [" +
+                "      { label: 'Mileage (km/L)', data: data, borderColor: '" + accHex + "', backgroundColor: '" + accHex + "', tension: 0.25, borderWidth: 2.5, pointRadius: 4 }," +
+                "      { label: 'Overall Avg', data: avgLine, borderColor: '#f59e0b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0 }" +
+                "    ]" +
                 "  }," +
-                "  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } }" +
+                "  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '" + txtHex + "', font: { size: 11 } } } }, scales: { x: { ticks: { color: '" + txtHex + "', font: { size: 10 } } }, y: { ticks: { color: '" + txtHex + "', font: { size: 10 } } } } }" +
                 "});" +
-                "function showChart(type) {" +
-                "  document.querySelectorAll('button').forEach(b => b.classList.remove('active'));" +
-                "  currentChart.destroy();" +
-                "  if(type === 'mileage') {" +
-                "    document.getElementById('btn1').classList.add('active');" +
-                "    currentChart = new Chart(ctx, { type: 'line', data: { labels: labels, datasets: [{ label: 'Mileage (km/L)', data: mileageData, borderColor: accentColor, backgroundColor: accentColor, tension: 0.2, borderWidth: 2, pointRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } } });" +
-                "  } else if(type === 'expense') {" +
-                "    document.getElementById('btn2').classList.add('active');" +
-                "    currentChart = new Chart(ctx, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Expense (₹)', data: expenseData, backgroundColor: '#3b82f6' }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } } });" +
-                "  } else if(type === 'distance') {" +
-                "    document.getElementById('btn3').classList.add('active');" +
-                "    currentChart = new Chart(ctx, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Distance (km)', data: distanceData, backgroundColor: '#10b981' }, { label: 'Fuel (L)', data: fuelData, backgroundColor: '#f59e0b' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: textColor, font: { size: 10 } } }, y: { ticks: { color: textColor, font: { size: 10 } } } } } });" +
-                "  }" +
-                "}" +
                 "</script></body></html>";
 
         chartWeb.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
         summary.addView(chartWeb);
         addSpace(root, 18);
     }
+
     private void entryForm(FuelDb.Vehicle vehicle) {
         LinearLayout form = card(root);
         form.addView(text("New fill-up", 20, primary, true)); addSpace(form, 6);
-        form.addView(text("Record your fuel purchase and current odometer.", 13, secondary, false)); addSpace(form, 19);
-        odoInput = input(form, "ODOMETER (KM)", "e.g. 18540", "");
-        litersInput = input(form, "FUEL QUANTITY (LITRES)", "e.g. 25.5", "");
-        amountInput = input(form, "AMOUNT SPENT (₹)", "e.g. 2500", "");
-        estimateInput = input(form, "ESTIMATED MILEAGE (KM/L) · OPTIONAL", "e.g. 18", vehicle.estimate > 0 ? nPlain(vehicle.estimate) : "");
+        form.addView(text("Record your fuel purchase, date, and current odometer.", 13, secondary, false)); addSpace(form, 16);
+
+        // Date Picker Field
+        form.addView(text("DATE OF FILL-UP", 12, secondary, true)); addSpace(form, 7);
+        Button dateBtn = button(date(selectedFillDate), false);
+        dateBtn.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        dateBtn.setPadding(d(14), 0, d(14), 0);
+        form.addView(dateBtn, lp(-1, 50));
+        dateBtn.setOnClickListener(v -> pickDate(selectedFillDate, millis -> {
+            selectedFillDate = millis;
+            dateBtn.setText(date(selectedFillDate));
+        }));
+        addSpace(form, 14);
+
+        odoInput = input(form, "ODOMETER (KM)", "e.g. 18540", "", true);
+        litersInput = input(form, "FUEL QUANTITY (LITRES)", "e.g. 25.5", "", true);
+        amountInput = input(form, "AMOUNT SPENT (₹)", "e.g. 2500", "", true);
+        estimateInput = input(form, "ESTIMATED MILEAGE (KM/L) · OPTIONAL", "e.g. 18", vehicle.estimate > 0 ? nPlain(vehicle.estimate) : "", true);
         TextView info = text("A mileage result appears after the second fill-up for this vehicle.", 12, secondary, false);
         form.addView(info); addSpace(form, 14);
         Button save = button("Save fill-up", true); form.addView(save, lp(-1, 49)); save.setOnClickListener(v -> saveFill(vehicle));
@@ -341,12 +356,13 @@ public class MainActivity extends Activity {
             double estimate = estimateText.isEmpty() ? 0 : number(estimateInput, "estimated mileage", true);
             FuelDb.Fill last = db.newest(vehicle.id);
             if (last != null && odo <= last.odometer) throw new IllegalArgumentException("Odometer must be above the previous reading (" + n(last.odometer) + " km).");
-            db.addFill(vehicle.id, System.currentTimeMillis(), odo, liters, amount, estimate);
-            // Remember latest estimate for future entries.
+            db.addFill(vehicle.id, selectedFillDate, odo, liters, amount, estimate);
             if (estimate != vehicle.estimate) db.updateVehicle(vehicle.id, vehicle.name, estimate);
+            selectedFillDate = System.currentTimeMillis(); // reset to today for next entry
             toast("Fill-up saved"); render();
         } catch (Exception e) { alert(e.getMessage() == null ? "Could not save fill-up." : e.getMessage()); }
     }
+
     private void history(FuelDb.Vehicle vehicle) {
         LinearLayout section = col(); root.addView(section, lp(-1, -2));
         LinearLayout heading = row(); section.addView(heading, lp(-1, -2));
@@ -377,6 +393,174 @@ public class MainActivity extends Activity {
             addSpace(section, 10);
         }
     }
+
+    // ==========================================
+    // TAB 2: EXPENSES (FUEL + MISC EXPENSES)
+    // ==========================================
+    private void expensesTabView(FuelDb.Vehicle vehicle) {
+        List<FuelDb.Fill> fills = db.fills(vehicle.id);
+        List<FuelDb.Expense> miscList = db.expenses(vehicle.id);
+
+        double totalFuelSpend = 0;
+        double totalMiscSpend = 0;
+
+        // Group expenses by Month (YYYY-MM) for clean stacked bar chart
+        TreeMap<String, double[]> monthlyMap = new TreeMap<>(); // key: YYYY-MM, val: [fuelSpend, miscSpend]
+        SimpleDateFormat keyFmt = new SimpleDateFormat("yyyy-MM", Locale.US);
+        SimpleDateFormat labelFmt = new SimpleDateFormat("MMM yy", Locale.US);
+        TreeMap<String, String> monthLabels = new TreeMap<>();
+
+        for (FuelDb.Fill f : fills) {
+            totalFuelSpend += f.amount;
+            Date dObj = new Date(f.time);
+            String k = keyFmt.format(dObj);
+            monthLabels.put(k, labelFmt.format(dObj));
+            double[] arr = monthlyMap.get(k);
+            if (arr == null) { arr = new double[]{0, 0}; monthlyMap.put(k, arr); }
+            arr[0] += f.amount;
+        }
+        for (FuelDb.Expense e : miscList) {
+            totalMiscSpend += e.amount;
+            Date dObj = new Date(e.time);
+            String k = keyFmt.format(dObj);
+            monthLabels.put(k, labelFmt.format(dObj));
+            double[] arr = monthlyMap.get(k);
+            if (arr == null) { arr = new double[]{0, 0}; monthlyMap.put(k, arr); }
+            arr[1] += e.amount;
+        }
+
+        double grandTotal = totalFuelSpend + totalMiscSpend;
+
+        // 1. Expense Overview Card + Stacked Bar Chart
+        LinearLayout overview = card(root);
+        overview.addView(text("TOTAL VEHICLE EXPENSES", 12, secondary, true)); addSpace(overview, 10);
+        overview.addView(text("₹" + n(grandTotal), 31, accent, true)); addSpace(overview, 6);
+        overview.addView(text("Fuel: ₹" + n(totalFuelSpend) + "   ·   Misc: ₹" + n(totalMiscSpend), 13, secondary, false));
+
+        if (!monthlyMap.isEmpty()) {
+            addSpace(overview, 16);
+            overview.addView(text("MONTHLY EXPENSE BREAKDOWN", 12, secondary, true)); addSpace(overview, 10);
+
+            StringBuilder monthsJson = new StringBuilder("[");
+            StringBuilder fuelExpJson = new StringBuilder("[");
+            StringBuilder miscExpJson = new StringBuilder("[");
+
+            for (Map.Entry<String, double[]> entry : monthlyMap.entrySet()) {
+                if (monthsJson.length() > 1) {
+                    monthsJson.append(",");
+                    fuelExpJson.append(",");
+                    miscExpJson.append(",");
+                }
+                monthsJson.append("'").append(monthLabels.get(entry.getKey())).append("'");
+                fuelExpJson.append(String.format(Locale.US, "%.2f", entry.getValue()[0]));
+                miscExpJson.append(String.format(Locale.US, "%.2f", entry.getValue()[1]));
+            }
+            monthsJson.append("]");
+            fuelExpJson.append("]");
+            miscExpJson.append("]");
+
+            WebView expWeb = new WebView(this);
+            expWeb.setLayoutParams(lp(-1, 230));
+            WebSettings settings = expWeb.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+
+            String bgHex = dark ? "#1B2225" : "#FFFFFF";
+            String txtHex = dark ? "#A2B1B4" : "#64777D";
+            String accHex = dark ? "#65DCC7" : "#0D796A";
+
+            String html = "<!DOCTYPE html><html><head>" +
+                    "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
+                    "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>" +
+                    "<style>body { background-color: " + bgHex + "; margin: 0; padding: 0; } .box { position: relative; height: 220px; width: 100%; }</style>" +
+                    "</head><body><div class='box'><canvas id='ec'></canvas></div><script>" +
+                    "new Chart(document.getElementById('ec').getContext('2d'), {" +
+                    "  type: 'bar'," +
+                    "  data: {" +
+                    "    labels: " + monthsJson.toString() + "," +
+                    "    datasets: [" +
+                    "      { label: 'Fuel (₹)', data: " + fuelExpJson.toString() + ", backgroundColor: '" + accHex + "' }," +
+                    "      { label: 'Misc (₹)', data: " + miscExpJson.toString() + ", backgroundColor: '#f59e0b' }" +
+                    "    ]" +
+                    "  }," +
+                    "  options: {" +
+                    "    responsive: true, maintainAspectRatio: false," +
+                    "    plugins: { legend: { labels: { color: '" + txtHex + "', font: { size: 11 } } } }," +
+                    "    scales: { x: { stacked: true, ticks: { color: '" + txtHex + "', font: { size: 10 } } }, y: { stacked: true, ticks: { color: '" + txtHex + "', font: { size: 10 } } } }" +
+                    "  }" +
+                    "});" +
+                    "</script></body></html>";
+
+            expWeb.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+            overview.addView(expWeb);
+        }
+        addSpace(root, 18);
+
+        // 2. Add Misc Expense Form
+        LinearLayout form = card(root);
+        form.addView(text("Add misc expense", 20, primary, true)); addSpace(form, 6);
+        form.addView(text("Track maintenance, insurance, tolls, car wash, or accessories.", 13, secondary, false)); addSpace(form, 16);
+
+        form.addView(text("DATE OF EXPENSE", 12, secondary, true)); addSpace(form, 7);
+        Button expDateBtn = button(date(selectedExpenseDate), false);
+        expDateBtn.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        expDateBtn.setPadding(d(14), 0, d(14), 0);
+        form.addView(expDateBtn, lp(-1, 50));
+        expDateBtn.setOnClickListener(v -> pickDate(selectedExpenseDate, millis -> {
+            selectedExpenseDate = millis;
+            expDateBtn.setText(date(selectedExpenseDate));
+        }));
+        addSpace(form, 14);
+
+        expTitleInput = input(form, "EXPENSE DESCRIPTION", "e.g. Oil Change / Insurance / Toll", "", false);
+        expAmountInput = input(form, "AMOUNT SPENT (₹)", "e.g. 1200", "", true);
+
+        Button saveExp = button("Save expense", true);
+        form.addView(saveExp, lp(-1, 49));
+        saveExp.setOnClickListener(v -> {
+            try {
+                String title = expTitleInput.getText().toString().trim();
+                if (title.isEmpty()) throw new IllegalArgumentException("Enter an expense description.");
+                double amt = number(expAmountInput, "amount spent", false);
+                db.addExpense(vehicle.id, selectedExpenseDate, title, amt);
+                selectedExpenseDate = System.currentTimeMillis();
+                toast("Expense saved"); render();
+            } catch (Exception e) {
+                alert(e.getMessage() == null ? "Could not save expense." : e.getMessage());
+            }
+        });
+        addSpace(root, 18);
+
+        // 3. Misc Expenses History List
+        LinearLayout section = col(); root.addView(section, lp(-1, -2));
+        LinearLayout heading = row(); section.addView(heading, lp(-1, -2));
+        heading.addView(text("Misc expense history", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
+        heading.addView(text(miscList.size() + " entries", 12, secondary, false)); addSpace(section, 12);
+
+        if (miscList.isEmpty()) {
+            LinearLayout empty = card(section);
+            empty.addView(text("No misc expenses yet", 15, primary, true)); addSpace(empty, 6);
+            empty.addView(text("Added expenses will appear here and sum into your total.", 13, secondary, false));
+            return;
+        }
+
+        for (FuelDb.Expense e : miscList) {
+            LinearLayout item = card(section);
+            LinearLayout titleRow = row(); item.addView(titleRow, lp(-1, -2));
+            LinearLayout left = col(); titleRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+            left.addView(text(e.title, 15, primary, true)); addSpace(left, 4);
+            left.addView(text(date(e.time) + "  ·  ₹" + n(e.amount), 13, accent, true));
+
+            Button delete = button("Delete", false);
+            titleRow.addView(delete, lp(78, 42));
+            delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete expense?")
+                    .setMessage("Remove '" + e.title + "' (₹" + n(e.amount) + ")?")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Delete", (dialog, which) -> { db.deleteExpense(e.id); render(); }).show());
+            addSpace(section, 10);
+        }
+    }
+
     private void metric(LinearLayout row, String label, String value) {
         LinearLayout block = col(); row.addView(block, new LinearLayout.LayoutParams(0, -2, 1));
         block.addView(text(label, 10, secondary, true)); addSpace(block, 6);
@@ -385,7 +569,7 @@ public class MainActivity extends Activity {
     private void filesCard() {
         LinearLayout card = card(root);
         card.addView(text("Your data", 20, primary, true)); addSpace(card, 7);
-        card.addView(text("Import or export all vehicles and fill-ups as one CSV file. Your data stays on your device.", 13, secondary, false)); addSpace(card, 16);
+        card.addView(text("Import or export all vehicles, fill-ups, and expenses as one CSV file.", 13, secondary, false)); addSpace(card, 16);
         LinearLayout actions = row(); card.addView(actions, lp(-1, -2));
         Button importBtn = button("Import CSV", false), exportBtn = button("Export CSV", true);
         LinearLayout.LayoutParams a = new LinearLayout.LayoutParams(0, d(48), 1); a.setMargins(0, 0, d(7), 0);
@@ -452,7 +636,7 @@ public class MainActivity extends Activity {
         } else if (requestCode == REQUEST_IMPORT) {
             try (InputStreamReader reader = new InputStreamReader(getContentResolver().openInputStream(uri), StandardCharsets.UTF_8)) {
                 CsvIO.Result result = CsvIO.importCsv(db, reader);
-                render(); alert("Import complete: " + result.vehicles + " new vehicles, " + result.fills + " new fill-ups, " + result.duplicates + " duplicates skipped.");
+                render(); alert("Import complete: " + result.vehicles + " new vehicles, " + result.fills + " new fill-ups, " + result.expenses + " misc expenses, " + result.duplicates + " duplicates skipped.");
             } catch (Exception e) { alert("Import failed (nothing was changed): " + e.getMessage()); }
         }
     }

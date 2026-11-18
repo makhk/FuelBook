@@ -26,10 +26,14 @@ public final class CsvIO {
             w.write("fill," + field(f.vehicleName) + "," + number(f.estimate) + "," + f.time + "," + number(f.odometer) + "," + number(f.liters) + "," + number(f.amount));
             w.newLine();
         }
+        for (FuelDb.Expense e : db.allExpenses()) {
+            w.write("expense," + field(e.vehicleName) + ",0," + e.time + "," + field(e.title) + ",0," + number(e.amount));
+            w.newLine();
+        }
         w.flush();
     }
     public static final class Result {
-        public int vehicles, fills, duplicates;
+        public int vehicles, fills, expenses, duplicates;
     }
     private static double parseNumber(String s, boolean allowZero) {
         double d = Double.parseDouble(s.trim());
@@ -56,14 +60,25 @@ public final class CsvIO {
                     long id = db.insertOrThrow("vehicles", null, cv);
                     v = new FuelDb.Vehicle(id, name, estimate); result.vehicles++;
                 } else if (type.equals("vehicle")) {
-                    // Explicit profile rows take precedence over existing mileage estimates.
                     ContentValues cv = new ContentValues(); cv.put("estimate", estimate);
                     db.update("vehicles", cv, "id=?", new String[]{String.valueOf(v.id)});
                 }
                 if (type.equals("vehicle")) continue;
-                if (!type.equals("fill")) throw new IllegalArgumentException("Unknown type in row " + (i + 1));
                 long time = Long.parseLong(row.get(3).trim());
                 if (time <= 0) throw new IllegalArgumentException("Invalid date in row " + (i + 1));
+
+                if (type.equals("expense")) {
+                    String title = row.get(4).trim();
+                    if (title.isEmpty()) title = "Misc Expense";
+                    double amount = parseNumber(row.get(6), true);
+                    ContentValues cv = new ContentValues(); cv.put("vehicle_id", v.id); cv.put("time", time);
+                    cv.put("title", title); cv.put("amount", amount);
+                    db.insertOrThrow("expenses", null, cv);
+                    result.expenses++;
+                    continue;
+                }
+
+                if (!type.equals("fill")) throw new IllegalArgumentException("Unknown type in row " + (i + 1));
                 double odo = parseNumber(row.get(4), true), liters = parseNumber(row.get(5), false), amount = parseNumber(row.get(6), true);
                 ContentValues cv = new ContentValues(); cv.put("vehicle_id", v.id); cv.put("time", time);
                 cv.put("odometer", odo); cv.put("liters", liters); cv.put("amount", amount); cv.put("estimate", estimate);
@@ -74,7 +89,6 @@ public final class CsvIO {
         } finally { db.endTransaction(); }
         return result;
     }
-    // CSV reader supports quoted delimiters, escaped quotes, CRLF, and quoted newlines.
     private static List<List<String>> parse(Reader r) throws IOException {
         List<List<String>> rows = new ArrayList<>();
         List<String> row = new ArrayList<>();
