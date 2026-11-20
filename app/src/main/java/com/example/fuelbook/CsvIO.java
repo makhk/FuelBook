@@ -30,10 +30,14 @@ public final class CsvIO {
             w.write("expense," + field(e.vehicleName) + ",0," + e.time + "," + field(e.title) + ",0," + number(e.amount));
             w.newLine();
         }
+        for (FuelDb.GeneralExpense g : db.generalExpenses()) {
+            w.write("general_expense," + field(g.category) + ",0," + g.time + "," + field(g.title) + ",0," + number(g.amount));
+            w.newLine();
+        }
         w.flush();
     }
     public static final class Result {
-        public int vehicles, fills, expenses, duplicates;
+        public int vehicles, fills, expenses, generalExpenses, duplicates;
     }
     private static double parseNumber(String s, boolean allowZero) {
         double d = Double.parseDouble(s.trim());
@@ -52,6 +56,25 @@ public final class CsvIO {
                 if (row.size() == 1 && row.get(0).trim().isEmpty()) continue;
                 if (row.size() != 7) throw new IllegalArgumentException("Row " + (i + 1) + " must have 7 columns");
                 String type = row.get(0).trim(), name = row.get(1).trim();
+
+                if (type.equals("general_expense")) {
+                    String category = name.isEmpty() ? "Other" : name;
+                    long time = Long.parseLong(row.get(3).trim());
+                    if (time <= 0) throw new IllegalArgumentException("Invalid date in row " + (i + 1));
+                    String title = row.get(4).trim();
+                    if (title.isEmpty()) title = category;
+                    double amount = parseNumber(row.get(6), true);
+
+                    ContentValues catCv = new ContentValues(); catCv.put("name", category);
+                    db.insertWithOnConflict("expense_categories", null, catCv, SQLiteDatabase.CONFLICT_IGNORE);
+
+                    ContentValues cv = new ContentValues(); cv.put("time", time);
+                    cv.put("category", category); cv.put("title", title); cv.put("amount", amount);
+                    db.insertOrThrow("general_expenses", null, cv);
+                    result.generalExpenses++;
+                    continue;
+                }
+
                 if (name.isEmpty()) throw new IllegalArgumentException("Missing vehicle in row " + (i + 1));
                 double estimate = row.get(2).trim().isEmpty() ? 0 : parseNumber(row.get(2), true);
                 FuelDb.Vehicle v = helper.vehicleByName(db, name);
