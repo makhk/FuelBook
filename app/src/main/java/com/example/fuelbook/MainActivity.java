@@ -789,8 +789,8 @@ public class MainActivity extends Activity {
                     ".box { position: relative; height: 210px; width: 100%; }" +
                     "</style></head><body>" +
                     "<div class='tabs'>" +
-                    "<button id='b1' onclick='renderChart("mileage")'>Mileage Trend</button>" +
-                    "<button id='b2' onclick='renderChart("expense")'>Expense Breakdown</button>" +
+                    "<button id='b1' onclick='renderChart(\"mileage\")'>Mileage Trend</button>" +
+                    "<button id='b2' onclick='renderChart(\"expense\")'>Expense Breakdown</button>" +
                     "</div>" +
                     "<div class='box'><canvas id='vc'></canvas></div>" +
                     "<script>" +
