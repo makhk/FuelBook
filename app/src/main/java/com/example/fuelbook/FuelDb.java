@@ -6,14 +6,24 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public final class FuelDb extends SQLiteOpenHelper {
+    public static final List<String> DEFAULT_CATEGORIES = Arrays.asList(
+            "Food", "Groceries", "Travel", "Commute", "Hotel", "Shopping", "Bills & Utilities", "Entertainment", "Health", "Other"
+    );
+
     public static final class Vehicle {
         public long id;
         public String name;
         public double estimate;
-        Vehicle(long id, String name, double estimate) { this.id = id; this.name = name; this.estimate = estimate; }
+        public double monthlyBudget;
+        Vehicle(long id, String name, double estimate, double monthlyBudget) {
+            this.id = id; this.name = name; this.estimate = estimate; this.monthlyBudget = monthlyBudget;
+        }
         @Override public String toString() { return name; }
     }
     public static final class Fill {
@@ -44,10 +54,19 @@ public final class FuelDb extends SQLiteOpenHelper {
             this.title = title; this.amount = amount;
         }
     }
+    public static final class CategoryInfo {
+        public long id;
+        public String name;
+        public double monthlyBudget;
+        public boolean isDefault;
+        CategoryInfo(long id, String name, double monthlyBudget, boolean isDefault) {
+            this.id = id; this.name = name; this.monthlyBudget = monthlyBudget; this.isDefault = isDefault;
+        }
+    }
 
-    public FuelDb(Context context) { super(context, "fuelbook.db", null, 3); }
+    public FuelDb(Context context) { super(context, "fuelbook.db", null, 4); }
     @Override public void onCreate(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE, estimate REAL NOT NULL DEFAULT 0)");
+        db.execSQL("CREATE TABLE vehicles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE, estimate REAL NOT NULL DEFAULT 0, monthly_budget REAL NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE fills (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE, time INTEGER NOT NULL, odometer REAL NOT NULL, liters REAL NOT NULL, amount REAL NOT NULL, estimate REAL NOT NULL DEFAULT 0, UNIQUE(vehicle_id, odometer))");
         db.execSQL("CREATE INDEX fills_vehicle_odo ON fills(vehicle_id, odometer DESC)");
         createVehicleExpensesTable(db);
@@ -58,11 +77,10 @@ public final class FuelDb extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX IF NOT EXISTS expenses_vehicle_time ON expenses(vehicle_id, time DESC)");
     }
     private void createGeneralTables(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE IF NOT EXISTS expense_categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS expense_categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE, monthly_budget REAL NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE IF NOT EXISTS general_expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, category TEXT NOT NULL, title TEXT NOT NULL, amount REAL NOT NULL)");
         db.execSQL("CREATE INDEX IF NOT EXISTS general_expenses_time ON general_expenses(time DESC)");
-        String[] defaults = {"Food", "Groceries", "Travel", "Commute", "Hotel", "Shopping", "Bills & Utilities", "Entertainment", "Health", "Other"};
-        for (String cat : defaults) {
+        for (String cat : DEFAULT_CATEGORIES) {
             ContentValues cv = new ContentValues();
             cv.put("name", cat);
             db.insertWithOnConflict("expense_categories", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
@@ -75,29 +93,33 @@ public final class FuelDb extends SQLiteOpenHelper {
         if (oldVersion < 3) {
             createGeneralTables(db);
         }
+        if (oldVersion < 4) {
+            try { db.execSQL("ALTER TABLE vehicles ADD COLUMN monthly_budget REAL NOT NULL DEFAULT 0"); } catch (Exception ignored) {}
+            try { db.execSQL("ALTER TABLE expense_categories ADD COLUMN monthly_budget REAL NOT NULL DEFAULT 0"); } catch (Exception ignored) {}
+        }
     }
     @Override public void onConfigure(SQLiteDatabase db) { super.onConfigure(db); db.setForeignKeyConstraintsEnabled(true); }
 
     // Vehicles
     public List<Vehicle> vehicles() {
         List<Vehicle> out = new ArrayList<>();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,name,estimate FROM vehicles ORDER BY name COLLATE NOCASE", null)) {
-            while (c.moveToNext()) out.add(new Vehicle(c.getLong(0), c.getString(1), c.getDouble(2)));
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,name,estimate,monthly_budget FROM vehicles ORDER BY name COLLATE NOCASE", null)) {
+            while (c.moveToNext()) out.add(new Vehicle(c.getLong(0), c.getString(1), c.getDouble(2), c.getDouble(3)));
         }
         return out;
     }
     public Vehicle vehicleByName(SQLiteDatabase db, String name) {
-        try (Cursor c = db.rawQuery("SELECT id,name,estimate FROM vehicles WHERE name=? COLLATE NOCASE", new String[]{name})) {
-            if (c.moveToFirst()) return new Vehicle(c.getLong(0), c.getString(1), c.getDouble(2));
+        try (Cursor c = db.rawQuery("SELECT id,name,estimate,monthly_budget FROM vehicles WHERE name=? COLLATE NOCASE", new String[]{name})) {
+            if (c.moveToFirst()) return new Vehicle(c.getLong(0), c.getString(1), c.getDouble(2), c.getDouble(3));
         }
         return null;
     }
-    public long addVehicle(String name, double estimate) {
-        ContentValues cv = new ContentValues(); cv.put("name", name); cv.put("estimate", estimate);
+    public long addVehicle(String name, double estimate, double monthlyBudget) {
+        ContentValues cv = new ContentValues(); cv.put("name", name); cv.put("estimate", estimate); cv.put("monthly_budget", monthlyBudget);
         return getWritableDatabase().insertOrThrow("vehicles", null, cv);
     }
-    public void updateVehicle(long id, String name, double estimate) {
-        ContentValues cv = new ContentValues(); cv.put("name", name); cv.put("estimate", estimate);
+    public void updateVehicle(long id, String name, double estimate, double monthlyBudget) {
+        ContentValues cv = new ContentValues(); cv.put("name", name); cv.put("estimate", estimate); cv.put("monthly_budget", monthlyBudget);
         getWritableDatabase().update("vehicles", cv, "id=?", new String[]{String.valueOf(id)});
     }
     public void deleteVehicle(long id) { getWritableDatabase().delete("vehicles", "id=?", new String[]{String.valueOf(id)}); }
@@ -132,6 +154,12 @@ public final class FuelDb extends SQLiteOpenHelper {
         cv.put("liters", liters); cv.put("amount", amount); cv.put("estimate", estimate);
         return getWritableDatabase().insertOrThrow("fills", null, cv);
     }
+    public void updateFill(long id, long time, double odo, double liters, double amount, double estimate) {
+        ContentValues cv = new ContentValues();
+        cv.put("time", time); cv.put("odometer", odo);
+        cv.put("liters", liters); cv.put("amount", amount); cv.put("estimate", estimate);
+        getWritableDatabase().update("fills", cv, "id=?", new String[]{String.valueOf(id)});
+    }
     public void deleteFill(long id) { getWritableDatabase().delete("fills", "id=?", new String[]{String.valueOf(id)}); }
 
     // Vehicle Misc Expenses
@@ -158,6 +186,11 @@ public final class FuelDb extends SQLiteOpenHelper {
         cv.put("title", title); cv.put("amount", amount);
         return getWritableDatabase().insertOrThrow("expenses", null, cv);
     }
+    public void updateExpense(long id, long time, String title, double amount) {
+        ContentValues cv = new ContentValues();
+        cv.put("time", time); cv.put("title", title); cv.put("amount", amount);
+        getWritableDatabase().update("expenses", cv, "id=?", new String[]{String.valueOf(id)});
+    }
     public void deleteExpense(long id) { getWritableDatabase().delete("expenses", "id=?", new String[]{String.valueOf(id)}); }
 
     // General Expenses & Categories
@@ -168,10 +201,58 @@ public final class FuelDb extends SQLiteOpenHelper {
         }
         return out;
     }
+    public List<CategoryInfo> categoryInfos() {
+        Set<String> defLower = new HashSet<>();
+        for (String d : DEFAULT_CATEGORIES) defLower.add(d.toLowerCase());
+        List<CategoryInfo> out = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT id,name,monthly_budget FROM expense_categories ORDER BY id ASC", null)) {
+            while (c.moveToNext()) {
+                String nm = c.getString(1);
+                out.add(new CategoryInfo(c.getLong(0), nm, c.getDouble(2), defLower.contains(nm.toLowerCase())));
+            }
+        }
+        return out;
+    }
     public void addCategory(String name) {
         ContentValues cv = new ContentValues();
         cv.put("name", name.trim());
         getWritableDatabase().insertWithOnConflict("expense_categories", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
+    }
+    public void setCategoryBudget(String name, double budget) {
+        ContentValues cv = new ContentValues();
+        cv.put("monthly_budget", budget);
+        getWritableDatabase().update("expense_categories", cv, "name=? COLLATE NOCASE", new String[]{name});
+    }
+    public void renameCategory(String oldName, String newName) {
+        String trimmed = newName.trim();
+        if (trimmed.isEmpty()) return;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues cv = new ContentValues();
+            cv.put("name", trimmed);
+            db.update("expense_categories", cv, "name=? COLLATE NOCASE", new String[]{oldName});
+
+            ContentValues expCv = new ContentValues();
+            expCv.put("category", trimmed);
+            db.update("general_expenses", expCv, "category=? COLLATE NOCASE", new String[]{oldName});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+    public void deleteCustomCategory(String name) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues expCv = new ContentValues();
+            expCv.put("category", "Other");
+            db.update("general_expenses", expCv, "category=? COLLATE NOCASE", new String[]{name});
+            db.delete("expense_categories", "name=? COLLATE NOCASE", new String[]{name});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
     }
     public List<GeneralExpense> generalExpenses() {
         List<GeneralExpense> out = new ArrayList<>();
@@ -187,6 +268,13 @@ public final class FuelDb extends SQLiteOpenHelper {
         cv.put("time", time); cv.put("category", category);
         cv.put("title", title); cv.put("amount", amount);
         return getWritableDatabase().insertOrThrow("general_expenses", null, cv);
+    }
+    public void updateGeneralExpense(long id, long time, String category, String title, double amount) {
+        addCategory(category);
+        ContentValues cv = new ContentValues();
+        cv.put("time", time); cv.put("category", category);
+        cv.put("title", title); cv.put("amount", amount);
+        getWritableDatabase().update("general_expenses", cv, "id=?", new String[]{String.valueOf(id)});
     }
     public void deleteGeneralExpense(long id) { getWritableDatabase().delete("general_expenses", "id=?", new String[]{String.valueOf(id)}); }
 }

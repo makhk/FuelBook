@@ -1,31 +1,32 @@
-# Fuelbook — Personal & Vehicle Expense Manager
+# Fuelbook — Offline Personal & Vehicle Expense Manager
 
-A lightweight, single-activity Android app written in Java with the Android SDK. Track everyday personal expenses alongside multi-vehicle fuel mileage, fuel costs, and maintenance expenses in one place.
+A lightweight, 100% offline, single-activity Android app written in Java with the Android SDK. Track everyday personal expenses alongside multi-vehicle fuel mileage, fuel costs, running cost per km, and maintenance expenses with zero network permissions.
 
 ## Features
 
 ### 1. General Expenses (Tab 1)
-- **Category Management:** Pre-loaded with default categories (*Food, Groceries, Travel, Commute, Hotel, Shopping, Bills & Utilities, Entertainment, Health, Other*) plus support for creating custom categories on the fly.
-- **Category Breakdown Chart:** Interactive Doughnut chart visualizing spending across categories.
-- **Custom Date Entry:** Log expenses with a native date picker, optional description/note, and amount (`₹`).
-- **Category-Grouped History:** Automatically groups expenses by category with category subtotals and a **Show all / Show fewer** toggle (previewing 5 entries by default for readability).
+- **Category Management & Budgets:** Pre-loaded with 10 default categories (*Food, Groceries, Travel, Commute, Hotel, Shopping, Bills & Utilities, Entertainment, Health, Other*), plus support for creating, renaming, deleting custom categories, and setting monthly budgets (overall and per-category) with color-coded progress alerts.
+- **Offline Category Breakdown Chart:** Crisp, locally bundled HTML5 Canvas Doughnut chart (`assets/chart.min.js`) visualizing spending distribution with zero internet access.
+- **Fast Entry & Quick-Fill Chips:** Log expenses with a native date picker, optional note, amount (`₹`), and one-tap quick-fill amount chips (`+₹50`, `+₹100`, `+₹250`, `+₹500`, `+₹1000`).
+- **Search, Filter & Edit:** Search notes/categories, filter by category, edit any existing entry, and browse category-grouped history with category subtotals and a **Show all / Show fewer** readability toggle.
 
 ### 2. Vehicle Expenses & Mileage (Tab 2)
-- **Multi-Vehicle Support:** Create, select, rename, and delete multiple vehicles with optional default estimated mileage (`km/L`).
-- **Unified Overview & Interactive Charts:** View **Overall Average Mileage** (`Total Distance ÷ Total Fuel`), total distance/fuel tracked, and **Total Vehicle Expenses** (`Fuel + Misc`) side-by-side. Switch seamlessly between the **Mileage Trend** line chart (with overall average reference line) and the monthly **Expense Breakdown** stacked bar chart (`Fuel` vs. `Misc`).
-- **Fuel Fill-ups & Misc Expenses:** Log fuel fill-ups (date, odometer, litres, cost) and vehicle-specific miscellaneous expenses (maintenance, insurance, tolls, car wash, accessories) with custom date pickers.
-- **Readable Histories:** Separate fill-up and vehicle misc expense histories with a **Show all / Show fewer** preview toggle.
+- **Multi-Vehicle Support & Budgets:** Create, select, rename, edit, and delete multiple vehicles with optional default estimated mileage (`km/L`) and monthly vehicle expense budgets.
+- **Unified Efficiency & Expense Overview:** View **Overall Average Mileage** (`Total Distance ÷ Total Fuel`), **Total Vehicle Expenses** (`Fuel + Misc`), **Running Cost per km** (`₹/km`), and **Average Fuel Price** (`₹/L`) at a glance.
+- **Offline Interactive Charts:** Toggle between the **Mileage Trend** line chart (with overall average reference line) and the monthly **Expense Breakdown** stacked bar chart (`Fuel` vs. `Misc`).
+- **Full CRUD & Search:** Add, edit, and delete fuel fill-ups and vehicle-specific miscellaneous expenses (maintenance, insurance, tolls, car wash) with search filtering and **Show all / Show fewer** history toggles.
 
-### 3. Time Period Filtering, Backup & Appearance
-- **Flexible Time Filters:** Filter charts, totals, and expense histories across both tabs by **All Time**, **Month-wise** (month selector), or **Custom Interval** (`From` and `To` date pickers).
-- **Local SQLite Persistence (v3):** Fast, reliable local storage (`fuelbook.db`) with confirmation dialogs before deleting records.
-- **Unified CSV Export / Import:** Export and import all general expenses, custom categories, vehicles, fill-ups, and vehicle misc expenses in a single CSV file via Android's system document picker.
+### 3. Time Period Filtering, Backups & Appearance
+- **Flexible Time Filters with Date Validation:** Filter charts, metrics, and histories across both tabs by **All Time**, **Month-wise** (month selector), or **Interval** (`From` and `To` date pickers with automatic date-order swap protection).
+- **Local SQLite Persistence (v4):** Fast, reliable local storage (`fuelbook.db`) with confirmation dialogs before deleting records.
+- **CSV Export/Import & SQLite Snapshot:** Export/import all general expenses, vehicles, fill-ups, and vehicle misc expenses in a single transactional CSV file (with import confirmation), or export a raw `.db` SQLite snapshot.
 - **Light & Dark Themes:** Theme toggle persisted across app restarts.
 
-## Mileage calculation
-- **Per-Fill Mileage:** `(current odometer − previous odometer) / litres added at the current fill-up` (in km/L), calculated starting from the second fill-up for each vehicle.
+## Mileage & Efficiency Formulas
+- **Per-Fill Mileage:** `(current odometer − previous odometer) / litres added at the current fill-up` (in `km/L`), calculated starting from the second fill-up for each vehicle.
 - **Overall Average Mileage:** `total valid distance tracked / total fuel consumed` across the selected period.
-- Accurate for the **full-tank-to-full-tank** method; entries are ordered by odometer per vehicle.
+- **Running Cost per km:** `total vehicle expenses (fuel + misc) / total valid distance tracked` (`₹/km`).
+- **Average Fuel Price:** `total fuel spend / total fuel litres` (`₹/L`).
 
 ## Open and build
 1. Install Android Studio (with Android SDK Platform 35, Build Tools, and JDK 17).
@@ -42,7 +43,5 @@ A lightweight, single-activity Android app written in Java with the Android SDK.
 - **`fill` rows:** Define fuel fill-ups (`odometer_km`, `liters`, `amount`).
 - **`expense` rows:** Define vehicle-specific miscellaneous expenses (`odometer_km` column holds the expense description, `amount` holds the expense amount).
 
-`epoch_millis` is Unix time in milliseconds; amounts use `₹` for display only and are stored as plain decimal numbers in CSV. CSV import is transactional (invalid rows roll back the entire import) and skips duplicate vehicle/odometer fill-ups.
-
 ## Privacy & Permissions
-All expense records, vehicle data, and theme preferences are stored locally on your device in SQLite. Import/export uses Android's system document picker without requiring external storage permissions. `android.permission.INTERNET` is used solely to load Chart.js inside embedded `WebView` components for rendering graphs.
+All expense records, vehicle data, budgets, and theme preferences live 100% locally on your device. Charts render offline from bundled assets (`app/src/main/assets/chart.min.js`), requiring **zero** permissions (no internet or external storage permissions).

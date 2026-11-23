@@ -81,7 +81,7 @@ public final class CsvIO {
                 if (v == null) {
                     ContentValues cv = new ContentValues(); cv.put("name", name); cv.put("estimate", estimate);
                     long id = db.insertOrThrow("vehicles", null, cv);
-                    v = new FuelDb.Vehicle(id, name, estimate); result.vehicles++;
+                    v = new FuelDb.Vehicle(id, name, estimate, 0); result.vehicles++;
                 } else if (type.equals("vehicle")) {
                     ContentValues cv = new ContentValues(); cv.put("estimate", estimate);
                     db.update("vehicles", cv, "id=?", new String[]{String.valueOf(v.id)});
