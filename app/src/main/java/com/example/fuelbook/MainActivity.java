@@ -36,29 +36,53 @@ import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 public class MainActivity extends Activity {
     private static final int REQUEST_IMPORT = 501, REQUEST_EXPORT = 502;
+    private static final int HISTORY_PREVIEW_LIMIT = 5;
+
     private FuelDb db;
     private SharedPreferences prefs;
     private boolean dark;
     private int bg, panel, primary, secondary, accent, tint, border, field;
     private long selectedVehicle = -1;
-    private int activeTab = 0; // 0 = General Expenses (Tab 1), 1 = Mileage & Fill-ups (Tab 2), 2 = Vehicle Expenses (Tab 3)
+    private int activeTab = 0; // 0 = General Expenses (Tab 1), 1 = Vehicle Expenses (Tab 2)
+
+    // Form states
     private long selectedGenDate = System.currentTimeMillis();
     private long selectedFillDate = System.currentTimeMillis();
     private long selectedExpenseDate = System.currentTimeMillis();
     private String selectedCategory = "Food";
+
+    // Filter states for Tab 1 (General Expenses)
+    private int genFilterMode = 0; // 0 = All Time, 1 = Month-wise, 2 = Custom Interval
+    private String genSelectedMonth = ""; // YYYY-MM
+    private long genStartMillis = 0;
+    private long genEndMillis = System.currentTimeMillis();
+    private boolean genHistoryExpanded = false;
+
+    // Filter states for Tab 2 (Vehicle Expenses & Mileage)
+    private int vehFilterMode = 0; // 0 = All Time, 1 = Month-wise, 2 = Custom Interval
+    private String vehSelectedMonth = ""; // YYYY-MM
+    private long vehStartMillis = 0;
+    private long vehEndMillis = System.currentTimeMillis();
+    private boolean fillHistoryExpanded = false;
+    private boolean vehMiscHistoryExpanded = false;
 
     private LinearLayout root;
     private EditText odoInput, litersInput, amountInput, estimateInput;
     private EditText expTitleInput, expAmountInput;
     private EditText genTitleInput, genAmountInput;
     private final DecimalFormat fmt = new DecimalFormat("#,##0.##");
+    private final SimpleDateFormat ymFmt = new SimpleDateFormat("yyyy-MM", Locale.US);
+    private final SimpleDateFormat ymLabelFmt = new SimpleDateFormat("MMMM yyyy", Locale.US);
+    private final SimpleDateFormat shortMonthFmt = new SimpleDateFormat("MMM yy", Locale.US);
 
     @Override public void onCreate(Bundle state) {
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
@@ -67,8 +91,41 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         db = new FuelDb(this);
         selectedVehicle = prefs.getLong("selected_vehicle", -1);
+
+        Calendar cal = Calendar.getInstance();
+        String curYm = ymFmt.format(cal.getTime());
+        genSelectedMonth = curYm;
+        vehSelectedMonth = curYm;
+        cal.add(Calendar.DAY_OF_MONTH, -30);
+        genStartMillis = startOfDay(cal.getTimeInMillis());
+        vehStartMillis = startOfDay(cal.getTimeInMillis());
+        genEndMillis = endOfDay(System.currentTimeMillis());
+        vehEndMillis = endOfDay(System.currentTimeMillis());
+
         colors(); render();
     }
+
+    private long startOfDay(long millis) {
+        Calendar c = Calendar.getInstance();
+        c.setTimeInMillis(millis);
+        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0);
+        return c.getTimeInMillis();
+    }
+    private long endOfDay(long millis) {
+        Calendar c = Calendar.getInstance();
+        c.setTimeInMillis(millis);
+        c.set(Calendar.HOUR_OF_DAY, 23); c.set(Calendar.MINUTE, 59); c.set(Calendar.SECOND, 59); c.set(Calendar.MILLISECOND, 999);
+        return c.getTimeInMillis();
+    }
+
+    private boolean matchesFilter(long timestamp, int mode, String ym, long startMs, long endMs) {
+        if (mode == 0) return true;
+        if (mode == 1) {
+            return ymFmt.format(new Date(timestamp)).equals(ym);
+        }
+        return timestamp >= startOfDay(startMs) && timestamp <= endOfDay(endMs);
+    }
+
     private void colors() {
         bg = Color.parseColor(dark ? "#101416" : "#F7F8FA");
         panel = Color.parseColor(dark ? "#1B2225" : "#FFFFFF");
@@ -107,7 +164,7 @@ public class MainActivity extends Activity {
         v.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         v.setTextColor(filled ? (dark ? Color.parseColor("#09251E") : Color.WHITE) : accent);
         v.setBackground(shape(filled ? accent : tint, 12, 0));
-        v.setPadding(d(8), d(6), d(8), d(6)); v.setMinHeight(d(46)); return v;
+        v.setPadding(d(10), d(6), d(10), d(6)); v.setMinHeight(d(44)); return v;
     }
     private EditText edit(String hint, String value, boolean numeric) {
         EditText e = new EditText(this); e.setSingleLine(true); e.setTextSize(16); e.setTextColor(primary); e.setHintTextColor(secondary);
@@ -148,6 +205,110 @@ public class MainActivity extends Activity {
     }
     private interface OnDatePicked { void onPicked(long millis); }
 
+    // Reusable Filter Card Builder (All Time | Month-wise | Custom Interval)
+    private void renderFilterBar(LinearLayout parent, boolean isGeneral, List<Long> allTimestamps) {
+        LinearLayout filterCard = card(parent);
+        filterCard.addView(text("TIME PERIOD FILTER (CHARTS & HISTORY)", 11, secondary, true));
+        addSpace(filterCard, 10);
+
+        int currentMode = isGeneral ? genFilterMode : vehFilterMode;
+        LinearLayout modeRow = row();
+        filterCard.addView(modeRow, lp(-1, -2));
+
+        Button bAll = button("All Time", currentMode == 0);
+        Button bMonth = button("Month-wise", currentMode == 1);
+        Button bRange = button("Interval", currentMode == 2);
+
+        LinearLayout.LayoutParams p1 = new LinearLayout.LayoutParams(0, d(40), 1); p1.setMargins(0, 0, d(4), 0);
+        LinearLayout.LayoutParams p2 = new LinearLayout.LayoutParams(0, d(40), 1); p2.setMargins(d(4), 0, d(4), 0);
+        LinearLayout.LayoutParams p3 = new LinearLayout.LayoutParams(0, d(40), 1); p3.setMargins(d(4), 0, 0, 0);
+
+        modeRow.addView(bAll, p1);
+        modeRow.addView(bMonth, p2);
+        modeRow.addView(bRange, p3);
+
+        bAll.setOnClickListener(v -> {
+            if (isGeneral) { genFilterMode = 0; genHistoryExpanded = false; }
+            else { vehFilterMode = 0; fillHistoryExpanded = false; vehMiscHistoryExpanded = false; }
+            render();
+        });
+        bMonth.setOnClickListener(v -> {
+            if (isGeneral) { genFilterMode = 1; genHistoryExpanded = false; }
+            else { vehFilterMode = 1; fillHistoryExpanded = false; vehMiscHistoryExpanded = false; }
+            render();
+        });
+        bRange.setOnClickListener(v -> {
+            if (isGeneral) { genFilterMode = 2; genHistoryExpanded = false; }
+            else { vehFilterMode = 2; fillHistoryExpanded = false; vehMiscHistoryExpanded = false; }
+            render();
+        });
+
+        if (currentMode == 1) {
+            addSpace(filterCard, 12);
+            TreeMap<String, String> availableMonths = new TreeMap<>(Collections.reverseOrder());
+            String curYm = ymFmt.format(new Date());
+            availableMonths.put(curYm, ymLabelFmt.format(new Date()));
+            for (Long ts : allTimestamps) {
+                Date dObj = new Date(ts);
+                availableMonths.put(ymFmt.format(dObj), ymLabelFmt.format(dObj));
+            }
+            List<String> ymKeys = new ArrayList<>(availableMonths.keySet());
+            List<String> ymLabels = new ArrayList<>(availableMonths.values());
+
+            String selectedYm = isGeneral ? genSelectedMonth : vehSelectedMonth;
+            int selIdx = ymKeys.indexOf(selectedYm);
+            if (selIdx < 0) {
+                selIdx = 0;
+                if (isGeneral) genSelectedMonth = ymKeys.get(0);
+                else vehSelectedMonth = ymKeys.get(0);
+            }
+
+            Spinner mSpinner = new Spinner(this);
+            ArrayAdapter<String> mAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, ymLabels);
+            mSpinner.setAdapter(mAdapter);
+            mSpinner.setBackground(shape(field, 10, 0));
+            mSpinner.setSelection(selIdx);
+            filterCard.addView(mSpinner, lp(-1, 48));
+            mSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                boolean init = true;
+                @Override public void onItemSelected(AdapterView<?> parentView, View view, int position, long id) {
+                    if (init) { init = false; return; }
+                    if (isGeneral) { genSelectedMonth = ymKeys.get(position); genHistoryExpanded = false; }
+                    else { vehSelectedMonth = ymKeys.get(position); fillHistoryExpanded = false; vehMiscHistoryExpanded = false; }
+                    render();
+                }
+                @Override public void onNothingSelected(AdapterView<?> parentView) {}
+            });
+        } else if (currentMode == 2) {
+            addSpace(filterCard, 12);
+            LinearLayout rangeRow = row();
+            filterCard.addView(rangeRow, lp(-1, -2));
+
+            long startMs = isGeneral ? genStartMillis : vehStartMillis;
+            long endMs = isGeneral ? genEndMillis : vehEndMillis;
+
+            Button startBtn = button("From: " + date(startMs), false);
+            Button endBtn = button("To: " + date(endMs), false);
+
+            LinearLayout.LayoutParams r1 = new LinearLayout.LayoutParams(0, d(44), 1); r1.setMargins(0, 0, d(4), 0);
+            LinearLayout.LayoutParams r2 = new LinearLayout.LayoutParams(0, d(44), 1); r2.setMargins(d(4), 0, 0, 0);
+            rangeRow.addView(startBtn, r1);
+            rangeRow.addView(endBtn, r2);
+
+            startBtn.setOnClickListener(v -> pickDate(startMs, picked -> {
+                if (isGeneral) { genStartMillis = startOfDay(picked); genHistoryExpanded = false; }
+                else { vehStartMillis = startOfDay(picked); fillHistoryExpanded = false; vehMiscHistoryExpanded = false; }
+                render();
+            }));
+            endBtn.setOnClickListener(v -> pickDate(endMs, picked -> {
+                if (isGeneral) { genEndMillis = endOfDay(picked); genHistoryExpanded = false; }
+                else { vehEndMillis = endOfDay(picked); fillHistoryExpanded = false; vehMiscHistoryExpanded = false; }
+                render();
+            }));
+        }
+        addSpace(parent, 18);
+    }
+
     private void render() {
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setBackgroundColor(bg);
         root = col(); root.setPadding(d(18), d(22), d(18), d(36)); scroll.addView(root);
@@ -161,77 +322,34 @@ public class MainActivity extends Activity {
         LinearLayout header = row(); root.addView(header, lp(-1, -2));
         LinearLayout names = col(); header.addView(names, new LinearLayout.LayoutParams(0, -2, 1));
         names.addView(text("Fuelbook", 28, primary, true)); addSpace(names, 5);
-        names.addView(text("Personal & vehicle expense manager.", 13, secondary, false));
+        names.addView(text("General & vehicle expense tracker.", 13, secondary, false));
         Button theme = button(dark ? "☀ Light" : "☾ Dark", false); header.addView(theme, lp(88, 44));
         theme.setOnClickListener(v -> { prefs.edit().putBoolean("dark", !dark).apply(); recreate(); });
         addSpace(root, 18);
 
-        // 3-Tab Navigation Bar: Tab 1 = General Expenses, Tab 2 = Mileage, Tab 3 = Vehicle Expenses
+        // 2-Tab Navigation Bar: Tab 1 = General Expenses, Tab 2 = Vehicle Expenses
         LinearLayout tabBar = row();
         tabBar.setPadding(d(4), d(4), d(4), d(4));
         tabBar.setBackground(shape(panel, 14, border));
         root.addView(tabBar, lp(-1, -2));
 
-        Button tabGeneral = button("General", activeTab == 0);
-        Button tabMileage = button("Mileage", activeTab == 1);
-        Button tabVehExp = button("Vehicle Exp.", activeTab == 2);
+        Button tabGeneral = button("General Expenses", activeTab == 0);
+        Button tabVehicle = button("Vehicle Expenses", activeTab == 1);
 
-        LinearLayout.LayoutParams tLp1 = new LinearLayout.LayoutParams(0, d(44), 1); tLp1.setMargins(0, 0, d(3), 0);
-        LinearLayout.LayoutParams tLp2 = new LinearLayout.LayoutParams(0, d(44), 1); tLp2.setMargins(d(3), 0, d(3), 0);
-        LinearLayout.LayoutParams tLp3 = new LinearLayout.LayoutParams(0, d(44), 1); tLp3.setMargins(d(3), 0, 0, 0);
+        LinearLayout.LayoutParams tLp1 = new LinearLayout.LayoutParams(0, d(46), 1); tLp1.setMargins(0, 0, d(4), 0);
+        LinearLayout.LayoutParams tLp2 = new LinearLayout.LayoutParams(0, d(46), 1); tLp2.setMargins(d(4), 0, 0, 0);
 
         tabBar.addView(tabGeneral, tLp1);
-        tabBar.addView(tabMileage, tLp2);
-        tabBar.addView(tabVehExp, tLp3);
+        tabBar.addView(tabVehicle, tLp2);
 
         tabGeneral.setOnClickListener(v -> { if (activeTab != 0) { activeTab = 0; render(); } });
-        tabMileage.setOnClickListener(v -> { if (activeTab != 1) { activeTab = 1; render(); } });
-        tabVehExp.setOnClickListener(v -> { if (activeTab != 2) { activeTab = 2; render(); } });
+        tabVehicle.setOnClickListener(v -> { if (activeTab != 1) { activeTab = 1; render(); } });
         addSpace(root, 18);
 
         if (activeTab == 0) {
             generalExpensesTabView();
         } else {
-            // Vehicle Selector shown on Vehicle-specific tabs (Tab 2 & Tab 3)
-            List<FuelDb.Vehicle> vehicles = db.vehicles();
-            FuelDb.Vehicle current = selected(vehicles);
-            LinearLayout selector = card(root);
-            LinearLayout pickerHeader = row(); selector.addView(pickerHeader, lp(-1, -2));
-            pickerHeader.addView(text("VEHICLE", 12, secondary, true), new LinearLayout.LayoutParams(0, -2, 1));
-            Button add = button("+ Add", false); pickerHeader.addView(add, lp(82, 41)); add.setOnClickListener(v -> vehicleDialog(null));
-            addSpace(selector, 10);
-            if (current != null) {
-                Spinner spinner = new Spinner(this);
-                ArrayAdapter<FuelDb.Vehicle> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, vehicles);
-                spinner.setAdapter(adapter); spinner.setBackground(shape(field, 10, 0));
-                int index = 0; for (int i = 0; i < vehicles.size(); i++) if (vehicles.get(i).id == current.id) index = i;
-                spinner.setSelection(index); selector.addView(spinner, lp(-1, 50));
-                spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-                    boolean initial = true;
-                    @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                        if (initial) { initial = false; return; }
-                        selectedVehicle = vehicles.get(position).id; prefs.edit().putLong("selected_vehicle", selectedVehicle).apply(); render();
-                    }
-                    @Override public void onNothingSelected(AdapterView<?> parent) {}
-                });
-                addSpace(selector, 11);
-                LinearLayout tools = row(); selector.addView(tools, lp(-1, -2));
-                tools.addView(text("Estimated: " + (current.estimate > 0 ? n(current.estimate) + " km/L" : "not set"), 13, secondary, false), new LinearLayout.LayoutParams(0, -2, 1));
-                Button manage = button("Edit vehicle", false); tools.addView(manage, lp(112, 42)); manage.setOnClickListener(v -> vehicleDialog(current));
-            } else {
-                selector.addView(text("Add a vehicle to start logging fuel & vehicle expenses.", 14, secondary, false));
-            }
-            addSpace(root, 18);
-
-            if (current != null) {
-                if (activeTab == 1) {
-                    mileageSummary(current);
-                    entryForm(current);
-                    history(current);
-                } else {
-                    vehicleExpensesTabView(current);
-                }
-            }
+            vehicleExpensesAndMileageTabView();
         }
 
         addSpace(root, 14); filesCard();
@@ -240,29 +358,47 @@ public class MainActivity extends Activity {
         foot.setGravity(Gravity.CENTER); foot.setLineSpacing(d(3), 1); root.addView(foot);
     }
 
-    // ==========================================
-    // TAB 1: GENERAL EXPENSE MANAGER
-    // ==========================================
+    // =========================================================
+    // TAB 1: GENERAL EXPENSES (WITH FILTER & CATEGORY GROUPING)
+    // =========================================================
     private void generalExpensesTabView() {
-        List<FuelDb.GeneralExpense> genList = db.generalExpenses();
+        List<FuelDb.GeneralExpense> allGen = db.generalExpenses();
+        List<Long> allTs = new ArrayList<>();
+        for (FuelDb.GeneralExpense g : allGen) allTs.add(g.time);
+
+        // Time Filter Bar
+        renderFilterBar(root, true, allTs);
+
+        // Apply active filter
+        List<FuelDb.GeneralExpense> filteredGen = new ArrayList<>();
         double totalGeneral = 0;
         Map<String, Double> catTotals = new LinkedHashMap<>();
+        Map<String, List<FuelDb.GeneralExpense>> groupedByCategory = new LinkedHashMap<>();
 
-        for (FuelDb.GeneralExpense g : genList) {
-            totalGeneral += g.amount;
-            Double cur = catTotals.get(g.category);
-            catTotals.put(g.category, (cur == null ? 0 : cur) + g.amount);
+        for (FuelDb.GeneralExpense g : allGen) {
+            if (matchesFilter(g.time, genFilterMode, genSelectedMonth, genStartMillis, genEndMillis)) {
+                filteredGen.add(g);
+                totalGeneral += g.amount;
+                Double cur = catTotals.get(g.category);
+                catTotals.put(g.category, (cur == null ? 0 : cur) + g.amount);
+
+                List<FuelDb.GeneralExpense> list = groupedByCategory.get(g.category);
+                if (list == null) { list = new ArrayList<>(); groupedByCategory.put(g.category, list); }
+                list.add(g);
+            }
         }
 
         // 1. Overview Card & Category Doughnut Chart
         LinearLayout overview = card(root);
-        overview.addView(text("TOTAL GENERAL EXPENSES", 12, secondary, true)); addSpace(overview, 10);
+        String periodTitle = genFilterMode == 0 ? "ALL-TIME GENERAL EXPENSES"
+                : (genFilterMode == 1 ? "EXPENSES · " + genSelectedMonth : "FILTERED INTERVAL EXPENSES");
+        overview.addView(text(periodTitle, 12, secondary, true)); addSpace(overview, 10);
         overview.addView(text("₹" + n(totalGeneral), 31, accent, true)); addSpace(overview, 6);
-        overview.addView(text(genList.size() + " recorded expenses across " + catTotals.size() + " categories", 13, secondary, false));
+        overview.addView(text(filteredGen.size() + " entries across " + catTotals.size() + " categories", 13, secondary, false));
 
         if (!catTotals.isEmpty()) {
             addSpace(overview, 16);
-            overview.addView(text("SPENDING BY CATEGORY", 12, secondary, true)); addSpace(overview, 10);
+            overview.addView(text("CATEGORY BREAKDOWN", 12, secondary, true)); addSpace(overview, 10);
 
             StringBuilder catsJson = new StringBuilder("[");
             StringBuilder valsJson = new StringBuilder("[");
@@ -315,7 +451,6 @@ public class MainActivity extends Activity {
         form.addView(text("New general expense", 20, primary, true)); addSpace(form, 6);
         form.addView(text("Log food, groceries, travel, commute, hotel, or custom expenses.", 13, secondary, false)); addSpace(form, 16);
 
-        // Category Row with "+ New" button
         LinearLayout catHeader = row(); form.addView(catHeader, lp(-1, -2));
         catHeader.addView(text("CATEGORY", 12, secondary, true), new LinearLayout.LayoutParams(0, -2, 1));
         Button newCatBtn = button("+ New Category", false);
@@ -358,7 +493,6 @@ public class MainActivity extends Activity {
         });
         addSpace(form, 14);
 
-        // Date Picker
         form.addView(text("DATE OF EXPENSE", 12, secondary, true)); addSpace(form, 7);
         Button genDateBtn = button(date(selectedGenDate), false);
         genDateBtn.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
@@ -390,138 +524,312 @@ public class MainActivity extends Activity {
         });
         addSpace(root, 18);
 
-        // 3. General Expense History
+        // 3. Grouped Expense History (Grouped by Category + Readability Cap)
         LinearLayout section = col(); root.addView(section, lp(-1, -2));
         LinearLayout heading = row(); section.addView(heading, lp(-1, -2));
-        heading.addView(text("General expense history", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
-        heading.addView(text(genList.size() + " entries", 12, secondary, false)); addSpace(section, 12);
+        heading.addView(text("Expenses by Category", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
+        heading.addView(text(filteredGen.size() + " entries", 12, secondary, false)); addSpace(section, 12);
 
-        if (genList.isEmpty()) {
+        if (filteredGen.isEmpty()) {
             LinearLayout empty = card(section);
-            empty.addView(text("No general expenses yet", 15, primary, true)); addSpace(empty, 6);
-            empty.addView(text("Log your everyday expenses above to track category spending.", 13, secondary, false));
+            empty.addView(text("No expenses in selected period", 15, primary, true)); addSpace(empty, 6);
+            empty.addView(text("Adjust your time filter above or add a new expense.", 13, secondary, false));
             return;
         }
 
-        for (FuelDb.GeneralExpense g : genList) {
-            LinearLayout item = card(section);
-            LinearLayout titleRow = row(); item.addView(titleRow, lp(-1, -2));
-            LinearLayout left = col(); titleRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+        int shownCount = 0;
+        int limit = genHistoryExpanded ? Integer.MAX_VALUE : HISTORY_PREVIEW_LIMIT;
 
-            // Category Badge + Title
-            TextView badge = text(g.category.toUpperCase(Locale.ROOT), 10, accent, true);
-            left.addView(badge); addSpace(left, 4);
-            left.addView(text(g.title, 15, primary, true)); addSpace(left, 4);
-            left.addView(text(date(g.time) + "  ·  ₹" + n(g.amount), 13, secondary, false));
+        for (Map.Entry<String, List<FuelDb.GeneralExpense>> groupEntry : groupedByCategory.entrySet()) {
+            if (shownCount >= limit) break;
 
-            Button delete = button("Delete", false);
-            titleRow.addView(delete, lp(78, 42));
-            delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete expense?")
-                    .setMessage("Remove '" + g.title + "' (₹" + n(g.amount) + ")?")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Delete", (dialog, which) -> { db.deleteGeneralExpense(g.id); render(); }).show());
-            addSpace(section, 10);
+            String catName = groupEntry.getKey();
+            List<FuelDb.GeneralExpense> items = groupEntry.getValue();
+            double catSum = catTotals.get(catName);
+
+            LinearLayout groupCard = card(section);
+            LinearLayout groupHeader = row();
+            groupCard.addView(groupHeader, lp(-1, -2));
+            groupHeader.addView(text(catName.toUpperCase(Locale.ROOT) + " (" + items.size() + ")", 12, accent, true), new LinearLayout.LayoutParams(0, -2, 1));
+            groupHeader.addView(text("₹" + n(catSum), 14, primary, true));
+            addSpace(groupCard, 12);
+
+            for (int idx = 0; idx < items.size(); idx++) {
+                if (shownCount >= limit) break;
+                FuelDb.GeneralExpense g = items.get(idx);
+                shownCount++;
+
+                if (idx > 0) {
+                    View divider = new View(this);
+                    divider.setBackgroundColor(border);
+                    groupCard.addView(divider, lp(-1, 1));
+                    addSpace(groupCard, 10);
+                }
+
+                LinearLayout itemRow = row();
+                groupCard.addView(itemRow, lp(-1, -2));
+
+                LinearLayout left = col();
+                itemRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+                left.addView(text(g.title, 14, primary, true)); addSpace(left, 4);
+                left.addView(text(date(g.time) + "  ·  ₹" + n(g.amount), 12, secondary, false));
+
+                Button delete = button("Delete", false);
+                itemRow.addView(delete, lp(74, 38));
+                delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete expense?")
+                        .setMessage("Remove '" + g.title + "' (₹" + n(g.amount) + ")?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Delete", (dialog, which) -> { db.deleteGeneralExpense(g.id); render(); }).show());
+
+                if (idx < items.size() - 1 && shownCount < limit) {
+                    addSpace(groupCard, 10);
+                }
+            }
+            addSpace(section, 12);
+        }
+
+        // Readability Toggle Button ("Show all X entries" / "Show fewer")
+        if (filteredGen.size() > HISTORY_PREVIEW_LIMIT) {
+            Button toggleBtn = button(
+                    genHistoryExpanded ? "Show fewer entries" : "Show all " + filteredGen.size() + " entries (" + (filteredGen.size() - shownCount) + " hidden)",
+                    false
+            );
+            section.addView(toggleBtn, lp(-1, 44));
+            toggleBtn.setOnClickListener(v -> {
+                genHistoryExpanded = !genHistoryExpanded;
+                render();
+            });
         }
     }
 
-    // ==========================================
-    // TAB 2: MILEAGE AT A GLANCE & FILL-UPS
-    // ==========================================
-    private void mileageSummary(FuelDb.Vehicle vehicle) {
-        List<FuelDb.Fill> list = db.fills(vehicle.id);
-        LinearLayout summary = card(root);
-        summary.addView(text("MILEAGE AT A GLANCE", 12, secondary, true)); addSpace(summary, 12);
+    // =========================================================================
+    // TAB 2: VEHICLE EXPENSES (MERGED MILEAGE + FUEL + VEHICLE MISC EXPENSES)
+    // =========================================================================
+    private void vehicleExpensesAndMileageTabView() {
+        List<FuelDb.Vehicle> vehicles = db.vehicles();
+        FuelDb.Vehicle current = selected(vehicles);
 
-        if (list.size() < 2) {
-            summary.addView(text("— km/L", 29, accent, true)); addSpace(summary, 5);
-            summary.addView(text(list.isEmpty() ? "Log your first fill-up to get started." : "Add one more fill-up to calculate mileage.", 13, secondary, false));
+        // Vehicle Selector Card
+        LinearLayout selector = card(root);
+        LinearLayout pickerHeader = row(); selector.addView(pickerHeader, lp(-1, -2));
+        pickerHeader.addView(text("VEHICLE", 12, secondary, true), new LinearLayout.LayoutParams(0, -2, 1));
+        Button add = button("+ Add", false); pickerHeader.addView(add, lp(82, 41)); add.setOnClickListener(v -> vehicleDialog(null));
+        addSpace(selector, 10);
+
+        if (current == null) {
+            selector.addView(text("Add a vehicle to start tracking mileage, fuel, and vehicle expenses.", 14, secondary, false));
             addSpace(root, 18);
             return;
         }
 
-        List<FuelDb.Fill> sorted = new ArrayList<>(list);
-        Collections.reverse(sorted);
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<FuelDb.Vehicle> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, vehicles);
+        spinner.setAdapter(adapter); spinner.setBackground(shape(field, 10, 0));
+        int index = 0; for (int i = 0; i < vehicles.size(); i++) if (vehicles.get(i).id == current.id) index = i;
+        spinner.setSelection(index); selector.addView(spinner, lp(-1, 50));
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            boolean initial = true;
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (initial) { initial = false; return; }
+                selectedVehicle = vehicles.get(position).id; prefs.edit().putLong("selected_vehicle", selectedVehicle).apply(); render();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        addSpace(selector, 11);
+        LinearLayout tools = row(); selector.addView(tools, lp(-1, -2));
+        tools.addView(text("Estimated: " + (current.estimate > 0 ? n(current.estimate) + " km/L" : "not set"), 13, secondary, false), new LinearLayout.LayoutParams(0, -2, 1));
+        Button manage = button("Edit vehicle", false); tools.addView(manage, lp(112, 42)); manage.setOnClickListener(v -> vehicleDialog(current));
+        addSpace(root, 18);
 
-        double totalDistance = 0;
-        double totalFuel = 0;
+        // Fetch all fills and misc expenses for selected vehicle
+        List<FuelDb.Fill> allFillsDesc = db.fills(current.id);
+        List<FuelDb.Expense> allMiscDesc = db.expenses(current.id);
 
-        StringBuilder datesJson = new StringBuilder("[");
-        StringBuilder mileageJson = new StringBuilder("[");
+        List<Long> allTs = new ArrayList<>();
+        for (FuelDb.Fill f : allFillsDesc) allTs.add(f.time);
+        for (FuelDb.Expense e : allMiscDesc) allTs.add(e.time);
 
-        for (int i = 1; i < sorted.size(); i++) {
-            FuelDb.Fill prev = sorted.get(i - 1);
-            FuelDb.Fill curr = sorted.get(i);
+        // Time Filter Bar
+        renderFilterBar(root, false, allTs);
+
+        // Compute Overall Mileage across valid sequential fill pairs (and filtered subset)
+        List<FuelDb.Fill> sortedFills = new ArrayList<>(allFillsDesc);
+        Collections.reverse(sortedFills); // chronological: oldest -> newest
+
+        double totalValidDist = 0;
+        double totalValidFuel = 0;
+        StringBuilder trendDatesJson = new StringBuilder("[");
+        StringBuilder trendMileageJson = new StringBuilder("[");
+
+        for (int i = 1; i < sortedFills.size(); i++) {
+            FuelDb.Fill prev = sortedFills.get(i - 1);
+            FuelDb.Fill curr = sortedFills.get(i);
             double dist = curr.odometer - prev.odometer;
             if (dist > 0 && curr.liters > 0) {
-                totalDistance += dist;
-                totalFuel += curr.liters;
                 double kml = dist / curr.liters;
-
-                if (datesJson.length() > 1) {
-                    datesJson.append(",");
-                    mileageJson.append(",");
+                if (matchesFilter(curr.time, vehFilterMode, vehSelectedMonth, vehStartMillis, vehEndMillis)) {
+                    totalValidDist += dist;
+                    totalValidFuel += curr.liters;
+                    if (trendDatesJson.length() > 1) {
+                        trendDatesJson.append(",");
+                        trendMileageJson.append(",");
+                    }
+                    trendDatesJson.append("'").append(date(curr.time)).append("'");
+                    trendMileageJson.append(String.format(Locale.US, "%.2f", kml));
                 }
-                datesJson.append("'").append(date(curr.time)).append("'");
-                mileageJson.append(String.format(Locale.US, "%.2f", kml));
             }
         }
-        datesJson.append("]");
-        mileageJson.append("]");
+        trendDatesJson.append("]");
+        trendMileageJson.append("]");
+        double overallAvgMileage = totalValidFuel > 0 ? totalValidDist / totalValidFuel : 0;
 
-        double overallAvg = totalFuel > 0 ? totalDistance / totalFuel : 0;
+        // Filter Fills & Misc Expenses for Expense Totals, Stacked Chart, and Histories
+        List<FuelDb.Fill> filteredFillsDesc = new ArrayList<>();
+        List<FuelDb.Expense> filteredMiscDesc = new ArrayList<>();
+        double totalFuelSpend = 0;
+        double totalMiscSpend = 0;
 
-        summary.addView(text(n(overallAvg) + " km/L", 31, accent, true)); addSpace(summary, 5);
-        summary.addView(text("Overall Average  ·  " + n(totalDistance) + " km tracked  ·  " + n(totalFuel) + " L fuel", 13, secondary, false));
+        TreeMap<String, double[]> monthlyMap = new TreeMap<>();
+        TreeMap<String, String> monthLabels = new TreeMap<>();
 
-        if (vehicle.estimate > 0) {
-            addSpace(summary, 8);
-            double delta = (overallAvg - vehicle.estimate) / vehicle.estimate * 100;
-            summary.addView(text("Vs default estimate (" + n(vehicle.estimate) + "): " + (delta >= 0 ? "+" : "") + n(delta) + "%", 13, primary, true));
+        for (FuelDb.Fill f : allFillsDesc) {
+            if (matchesFilter(f.time, vehFilterMode, vehSelectedMonth, vehStartMillis, vehEndMillis)) {
+                filteredFillsDesc.add(f);
+                totalFuelSpend += f.amount;
+                Date dObj = new Date(f.time);
+                String k = ymFmt.format(dObj);
+                monthLabels.put(k, shortMonthFmt.format(dObj));
+                double[] arr = monthlyMap.get(k);
+                if (arr == null) { arr = new double[]{0, 0}; monthlyMap.put(k, arr); }
+                arr[0] += f.amount;
+            }
+        }
+        for (FuelDb.Expense e : allMiscDesc) {
+            if (matchesFilter(e.time, vehFilterMode, vehSelectedMonth, vehStartMillis, vehEndMillis)) {
+                filteredMiscDesc.add(e);
+                totalMiscSpend += e.amount;
+                Date dObj = new Date(e.time);
+                String k = ymFmt.format(dObj);
+                monthLabels.put(k, shortMonthFmt.format(dObj));
+                double[] arr = monthlyMap.get(k);
+                if (arr == null) { arr = new double[]{0, 0}; monthlyMap.put(k, arr); }
+                arr[1] += e.amount;
+            }
+        }
+        double grandTotalVehicleExpense = totalFuelSpend + totalMiscSpend;
+
+        // 1. Unified Overview Card: Overall Mileage + Total Vehicle Expenses + Charts
+        LinearLayout glance = card(root);
+        glance.addView(text("MILEAGE & VEHICLE EXPENSES AT A GLANCE", 12, secondary, true)); addSpace(glance, 12);
+
+        LinearLayout kpiRow = row();
+        glance.addView(kpiRow, lp(-1, -2));
+
+        LinearLayout leftKpi = col();
+        kpiRow.addView(leftKpi, new LinearLayout.LayoutParams(0, -2, 1));
+        leftKpi.addView(text("OVERALL MILEAGE", 10, secondary, true)); addSpace(leftKpi, 4);
+        leftKpi.addView(text(overallAvgMileage > 0 ? n(overallAvgMileage) + " km/L" : "— km/L", 24, accent, true)); addSpace(leftKpi, 4);
+        leftKpi.addView(text(n(totalValidDist) + " km  ·  " + n(totalValidFuel) + " L", 12, secondary, false));
+
+        LinearLayout rightKpi = col();
+        kpiRow.addView(rightKpi, new LinearLayout.LayoutParams(0, -2, 1));
+        rightKpi.addView(text("TOTAL EXPENSES", 10, secondary, true)); addSpace(rightKpi, 4);
+        rightKpi.addView(text("₹" + n(grandTotalVehicleExpense), 24, primary, true)); addSpace(rightKpi, 4);
+        rightKpi.addView(text("Fuel ₹" + n(totalFuelSpend) + " · Misc ₹" + n(totalMiscSpend), 12, secondary, false));
+
+        if (overallAvgMileage > 0 && current.estimate > 0) {
+            addSpace(glance, 10);
+            double delta = (overallAvgMileage - current.estimate) / current.estimate * 100;
+            glance.addView(text("Vs default estimate (" + n(current.estimate) + " km/L): " + (delta >= 0 ? "+" : "") + n(delta) + "%", 12, primary, true));
         }
 
-        addSpace(summary, 16);
-        summary.addView(text("MILEAGE TREND", 12, secondary, true)); addSpace(summary, 10);
+        // Interactive Graph Switcher inside Vehicle Overview (Mileage Trend vs Expense Breakdown)
+        if (overallAvgMileage > 0 || !monthlyMap.isEmpty()) {
+            addSpace(glance, 16);
 
-        WebView chartWeb = new WebView(this);
-        chartWeb.setLayoutParams(lp(-1, 220));
-        WebSettings settings = chartWeb.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
+            StringBuilder monthsJson = new StringBuilder("[");
+            StringBuilder fuelExpJson = new StringBuilder("[");
+            StringBuilder miscExpJson = new StringBuilder("[");
+            for (Map.Entry<String, double[]> entry : monthlyMap.entrySet()) {
+                if (monthsJson.length() > 1) {
+                    monthsJson.append(",");
+                    fuelExpJson.append(",");
+                    miscExpJson.append(",");
+                }
+                monthsJson.append("'").append(monthLabels.get(entry.getKey())).append("'");
+                fuelExpJson.append(String.format(Locale.US, "%.2f", entry.getValue()[0]));
+                miscExpJson.append(String.format(Locale.US, "%.2f", entry.getValue()[1]));
+            }
+            monthsJson.append("]");
+            fuelExpJson.append("]");
+            miscExpJson.append("]");
 
-        String bgHex = dark ? "#1B2225" : "#FFFFFF";
-        String txtHex = dark ? "#A2B1B4" : "#64777D";
-        String accHex = dark ? "#65DCC7" : "#0D796A";
+            WebView chartWeb = new WebView(this);
+            chartWeb.setLayoutParams(lp(-1, 260));
+            WebSettings settings = chartWeb.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
 
-        String html = "<!DOCTYPE html><html><head>" +
-                "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
-                "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>" +
-                "<style>body { background-color: " + bgHex + "; margin: 0; padding: 0; } .box { position: relative; height: 210px; width: 100%; }</style>" +
-                "</head><body><div class='box'><canvas id='c'></canvas></div><script>" +
-                "const labels = " + datesJson.toString() + ";" +
-                "const data = " + mileageJson.toString() + ";" +
-                "const avgLine = labels.map(() => " + String.format(Locale.US, "%.2f", overallAvg) + ");" +
-                "new Chart(document.getElementById('c').getContext('2d'), {" +
-                "  type: 'line'," +
-                "  data: {" +
-                "    labels: labels," +
-                "    datasets: [" +
-                "      { label: 'Mileage (km/L)', data: data, borderColor: '" + accHex + "', backgroundColor: '" + accHex + "', tension: 0.25, borderWidth: 2.5, pointRadius: 4 }," +
-                "      { label: 'Overall Avg', data: avgLine, borderColor: '#f59e0b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0 }" +
-                "    ]" +
-                "  }," +
-                "  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '" + txtHex + "', font: { size: 11 } } } }, scales: { x: { ticks: { color: '" + txtHex + "', font: { size: 10 } } }, y: { ticks: { color: '" + txtHex + "', font: { size: 10 } } } } }" +
-                "});" +
-                "</script></body></html>";
+            String bgHex = dark ? "#1B2225" : "#FFFFFF";
+            String txtHex = dark ? "#A2B1B4" : "#64777D";
+            String accHex = dark ? "#65DCC7" : "#0D796A";
+            String tabBg = dark ? "#263034" : "#E7F6F1";
+            String activeTxt = dark ? "#09251E" : "#FFFFFF";
 
-        chartWeb.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
-        summary.addView(chartWeb);
+            String defaultChart = overallAvgMileage > 0 ? "mileage" : "expense";
+
+            String html = "<!DOCTYPE html><html><head>" +
+                    "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
+                    "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>" +
+                    "<style>" +
+                    "body { background-color: " + bgHex + "; margin: 0; padding: 0; font-family: sans-serif; }" +
+                    ".tabs { display: flex; gap: 6px; margin-bottom: 8px; }" +
+                    "button { flex: 1; background: " + tabBg + "; color: " + accHex + "; border: none; padding: 7px; border-radius: 8px; font-size: 11px; font-weight: bold; }" +
+                    "button.active { background: " + accHex + "; color: " + activeTxt + "; }" +
+                    ".box { position: relative; height: 210px; width: 100%; }" +
+                    "</style></head><body>" +
+                    "<div class='tabs'>" +
+                    "<button id='b1' onclick='renderChart("mileage")'>Mileage Trend</button>" +
+                    "<button id='b2' onclick='renderChart("expense")'>Expense Breakdown</button>" +
+                    "</div>" +
+                    "<div class='box'><canvas id='vc'></canvas></div>" +
+                    "<script>" +
+                    "const tLabels = " + trendDatesJson.toString() + ";" +
+                    "const tData = " + trendMileageJson.toString() + ";" +
+                    "const avgLine = tLabels.map(() => " + String.format(Locale.US, "%.2f", overallAvgMileage) + ");" +
+                    "const mLabels = " + monthsJson.toString() + ";" +
+                    "const fData = " + fuelExpJson.toString() + ";" +
+                    "const miscData = " + miscExpJson.toString() + ";" +
+                    "let ctx = document.getElementById('vc').getContext('2d');" +
+                    "let chart = null;" +
+                    "function renderChart(type) {" +
+                    "  document.getElementById('b1').classList.toggle('active', type === 'mileage');" +
+                    "  document.getElementById('b2').classList.toggle('active', type === 'expense');" +
+                    "  if (chart) chart.destroy();" +
+                    "  if (type === 'mileage') {" +
+                    "    chart = new Chart(ctx, { type: 'line', data: { labels: tLabels, datasets: [" +
+                    "      { label: 'Mileage (km/L)', data: tData, borderColor: '" + accHex + "', backgroundColor: '" + accHex + "', tension: 0.25, borderWidth: 2.5, pointRadius: 4 }," +
+                    "      { label: 'Overall Avg', data: avgLine, borderColor: '#f59e0b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0 }" +
+                    "    ] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '" + txtHex + "', font: { size: 11 } } } }, scales: { x: { ticks: { color: '" + txtHex + "', font: { size: 10 } } }, y: { ticks: { color: '" + txtHex + "', font: { size: 10 } } } } } });" +
+                    "  } else {" +
+                    "    chart = new Chart(ctx, { type: 'bar', data: { labels: mLabels, datasets: [" +
+                    "      { label: 'Fuel (₹)', data: fData, backgroundColor: '" + accHex + "' }," +
+                    "      { label: 'Misc (₹)', data: miscData, backgroundColor: '#f59e0b' }" +
+                    "    ] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '" + txtHex + "', font: { size: 11 } } } }, scales: { x: { stacked: true, ticks: { color: '" + txtHex + "', font: { size: 10 } } }, y: { stacked: true, ticks: { color: '" + txtHex + "', font: { size: 10 } } } } } });" +
+                    "  }" +
+                    "}" +
+                    "renderChart('" + defaultChart + "');" +
+                    "</script></body></html>";
+
+            chartWeb.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+            glance.addView(chartWeb);
+        }
         addSpace(root, 18);
-    }
 
-    private void entryForm(FuelDb.Vehicle vehicle) {
+        // 2. New Fill-up Form (with Date Picker)
         LinearLayout form = card(root);
-        form.addView(text("New fill-up", 20, primary, true)); addSpace(form, 6);
-        form.addView(text("Record your fuel purchase, date, and current odometer.", 13, secondary, false)); addSpace(form, 16);
+        form.addView(text("New fuel fill-up", 20, primary, true)); addSpace(form, 6);
+        form.addView(text("Record fuel purchase, date, and odometer.", 13, secondary, false)); addSpace(form, 16);
 
         form.addView(text("DATE OF FILL-UP", 12, secondary, true)); addSpace(form, 7);
         Button dateBtn = button(date(selectedFillDate), false);
@@ -537,12 +845,128 @@ public class MainActivity extends Activity {
         odoInput = input(form, "ODOMETER (KM)", "e.g. 18540", "", true);
         litersInput = input(form, "FUEL QUANTITY (LITRES)", "e.g. 25.5", "", true);
         amountInput = input(form, "AMOUNT SPENT (₹)", "e.g. 2500", "", true);
-        estimateInput = input(form, "ESTIMATED MILEAGE (KM/L) · OPTIONAL", "e.g. 18", vehicle.estimate > 0 ? nPlain(vehicle.estimate) : "", true);
-        TextView info = text("A mileage result appears after the second fill-up for this vehicle.", 12, secondary, false);
-        form.addView(info); addSpace(form, 14);
-        Button save = button("Save fill-up", true); form.addView(save, lp(-1, 49)); save.setOnClickListener(v -> saveFill(vehicle));
+        estimateInput = input(form, "ESTIMATED MILEAGE (KM/L) · OPTIONAL", "e.g. 18", current.estimate > 0 ? nPlain(current.estimate) : "", true);
+        Button save = button("Save fill-up", true); form.addView(save, lp(-1, 49)); save.setOnClickListener(v -> saveFill(current));
         addSpace(root, 18);
+
+        // 3. Add Vehicle Misc Expense Form
+        LinearLayout miscForm = card(root);
+        miscForm.addView(text("New vehicle misc expense", 20, primary, true)); addSpace(miscForm, 6);
+        miscForm.addView(text("Track maintenance, insurance, tolls, car wash, or accessories.", 13, secondary, false)); addSpace(miscForm, 16);
+
+        miscForm.addView(text("DATE OF EXPENSE", 12, secondary, true)); addSpace(miscForm, 7);
+        Button expDateBtn = button(date(selectedExpenseDate), false);
+        expDateBtn.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        expDateBtn.setPadding(d(14), 0, d(14), 0);
+        miscForm.addView(expDateBtn, lp(-1, 50));
+        expDateBtn.setOnClickListener(v -> pickDate(selectedExpenseDate, millis -> {
+            selectedExpenseDate = millis;
+            expDateBtn.setText(date(selectedExpenseDate));
+        }));
+        addSpace(miscForm, 14);
+
+        expTitleInput = input(miscForm, "EXPENSE DESCRIPTION", "e.g. Oil Change / Insurance / Toll", "", false);
+        expAmountInput = input(miscForm, "AMOUNT SPENT (₹)", "e.g. 1200", "", true);
+
+        Button saveExp = button("Save vehicle expense", true);
+        miscForm.addView(saveExp, lp(-1, 49));
+        saveExp.setOnClickListener(v -> {
+            try {
+                String title = expTitleInput.getText().toString().trim();
+                if (title.isEmpty()) throw new IllegalArgumentException("Enter an expense description.");
+                double amt = number(expAmountInput, "amount spent", false);
+                db.addExpense(current.id, selectedExpenseDate, title, amt);
+                selectedExpenseDate = System.currentTimeMillis();
+                toast("Vehicle expense saved"); render();
+            } catch (Exception e) {
+                alert(e.getMessage() == null ? "Could not save expense." : e.getMessage());
+            }
+        });
+        addSpace(root, 18);
+
+        // 4. Fill-up History (Filtered + Readability Cap)
+        LinearLayout fillSection = col(); root.addView(fillSection, lp(-1, -2));
+        LinearLayout fHeading = row(); fillSection.addView(fHeading, lp(-1, -2));
+        fHeading.addView(text("Fill-up history", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
+        fHeading.addView(text(filteredFillsDesc.size() + " entries", 12, secondary, false)); addSpace(fillSection, 12);
+
+        if (filteredFillsDesc.isEmpty()) {
+            LinearLayout empty = card(fillSection);
+            empty.addView(text("No fill-ups in selected period", 15, primary, true)); addSpace(empty, 6);
+            empty.addView(text("Adjust your filter above or save a fill-up.", 13, secondary, false));
+        } else {
+            int fLimit = fillHistoryExpanded ? filteredFillsDesc.size() : Math.min(filteredFillsDesc.size(), HISTORY_PREVIEW_LIMIT);
+            for (int i = 0; i < fLimit; i++) {
+                FuelDb.Fill f = filteredFillsDesc.get(i);
+                // Find true previous fill in full chronological list for accurate trip mileage
+                int fullIdx = allFillsDesc.indexOf(f);
+                FuelDb.Fill prev = (fullIdx >= 0 && fullIdx + 1 < allFillsDesc.size()) ? allFillsDesc.get(fullIdx + 1) : null;
+
+                LinearLayout item = card(fillSection);
+                LinearLayout titleRow = row(); item.addView(titleRow, lp(-1, -2));
+                LinearLayout left = col(); titleRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+                left.addView(text(date(f.time), 14, primary, true)); addSpace(left, 5);
+                left.addView(text(n(f.odometer) + " km on odometer", 12, secondary, false));
+                Button delete = button("Delete", false); titleRow.addView(delete, lp(78, 42));
+                delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete fill-up?")
+                        .setMessage("This cannot be undone. Mileage will be recalculated from the remaining entries.")
+                        .setNegativeButton("Cancel", null).setPositiveButton("Delete", (dialog, which) -> { db.deleteFill(f.id); render(); }).show());
+                addSpace(item, 14);
+                LinearLayout nums = row(); item.addView(nums, lp(-1, -2));
+                metric(nums, "FUEL", n(f.liters) + " L"); metric(nums, "SPENT", "₹" + n(f.amount));
+                metric(nums, "ACTUAL", prev == null ? "—" : n((f.odometer - prev.odometer) / f.liters) + " km/L");
+                addSpace(fillSection, 10);
+            }
+            if (filteredFillsDesc.size() > HISTORY_PREVIEW_LIMIT) {
+                Button toggleFills = button(
+                        fillHistoryExpanded ? "Show fewer fill-ups" : "Show all " + filteredFillsDesc.size() + " fill-ups (" + (filteredFillsDesc.size() - fLimit) + " hidden)",
+                        false
+                );
+                fillSection.addView(toggleFills, lp(-1, 44));
+                toggleFills.setOnClickListener(v -> { fillHistoryExpanded = !fillHistoryExpanded; render(); });
+            }
+        }
+        addSpace(root, 18);
+
+        // 5. Vehicle Misc Expense History (Filtered + Readability Cap)
+        LinearLayout miscSection = col(); root.addView(miscSection, lp(-1, -2));
+        LinearLayout mHeading = row(); miscSection.addView(mHeading, lp(-1, -2));
+        mHeading.addView(text("Vehicle misc history", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
+        mHeading.addView(text(filteredMiscDesc.size() + " entries", 12, secondary, false)); addSpace(miscSection, 12);
+
+        if (filteredMiscDesc.isEmpty()) {
+            LinearLayout empty = card(miscSection);
+            empty.addView(text("No vehicle misc expenses in period", 15, primary, true)); addSpace(empty, 6);
+            empty.addView(text("Added maintenance/toll expenses will appear here.", 13, secondary, false));
+        } else {
+            int mLimit = vehMiscHistoryExpanded ? filteredMiscDesc.size() : Math.min(filteredMiscDesc.size(), HISTORY_PREVIEW_LIMIT);
+            for (int i = 0; i < mLimit; i++) {
+                FuelDb.Expense e = filteredMiscDesc.get(i);
+                LinearLayout item = card(miscSection);
+                LinearLayout titleRow = row(); item.addView(titleRow, lp(-1, -2));
+                LinearLayout left = col(); titleRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+                left.addView(text(e.title, 15, primary, true)); addSpace(left, 4);
+                left.addView(text(date(e.time) + "  ·  ₹" + n(e.amount), 13, accent, true));
+
+                Button delete = button("Delete", false);
+                titleRow.addView(delete, lp(78, 42));
+                delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete expense?")
+                        .setMessage("Remove '" + e.title + "' (₹" + n(e.amount) + ")?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Delete", (dialog, which) -> { db.deleteExpense(e.id); render(); }).show());
+                addSpace(miscSection, 10);
+            }
+            if (filteredMiscDesc.size() > HISTORY_PREVIEW_LIMIT) {
+                Button toggleMisc = button(
+                        vehMiscHistoryExpanded ? "Show fewer misc expenses" : "Show all " + filteredMiscDesc.size() + " misc expenses (" + (filteredMiscDesc.size() - mLimit) + " hidden)",
+                        false
+                );
+                miscSection.addView(toggleMisc, lp(-1, 44));
+                toggleMisc.setOnClickListener(v -> { vehMiscHistoryExpanded = !vehMiscHistoryExpanded; render(); });
+            }
+        }
     }
+
     private String nPlain(double x) { return String.valueOf(x); }
     private void saveFill(FuelDb.Vehicle vehicle) {
         try {
@@ -558,200 +982,6 @@ public class MainActivity extends Activity {
             selectedFillDate = System.currentTimeMillis();
             toast("Fill-up saved"); render();
         } catch (Exception e) { alert(e.getMessage() == null ? "Could not save fill-up." : e.getMessage()); }
-    }
-
-    private void history(FuelDb.Vehicle vehicle) {
-        LinearLayout section = col(); root.addView(section, lp(-1, -2));
-        LinearLayout heading = row(); section.addView(heading, lp(-1, -2));
-        heading.addView(text("Fill-up history", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
-        List<FuelDb.Fill> fills = db.fills(vehicle.id);
-        heading.addView(text(fills.size() + " entries", 12, secondary, false)); addSpace(section, 12);
-        if (fills.isEmpty()) {
-            LinearLayout empty = card(section); empty.addView(text("No fill-ups yet", 15, primary, true)); addSpace(empty, 6);
-            empty.addView(text("Saved entries will appear here.", 13, secondary, false)); return;
-        }
-        for (int i = 0; i < fills.size(); i++) {
-            FuelDb.Fill f = fills.get(i);
-            FuelDb.Fill prev = i + 1 < fills.size() ? fills.get(i + 1) : null;
-            LinearLayout item = card(section);
-            LinearLayout titleRow = row(); item.addView(titleRow, lp(-1, -2));
-            LinearLayout left = col(); titleRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
-            left.addView(text(date(f.time), 14, primary, true)); addSpace(left, 5);
-            left.addView(text(n(f.odometer) + " km on odometer", 12, secondary, false));
-            Button delete = button("Delete", false); titleRow.addView(delete, lp(78, 42));
-            delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete fill-up?")
-                    .setMessage("This cannot be undone. Mileage will be recalculated from the remaining entries.")
-                    .setNegativeButton("Cancel", null).setPositiveButton("Delete", (dialog, which) -> { db.deleteFill(f.id); render(); }).show());
-            addSpace(item, 14);
-            LinearLayout nums = row(); item.addView(nums, lp(-1, -2));
-            metric(nums, "FUEL", n(f.liters) + " L"); metric(nums, "SPENT", "₹" + n(f.amount));
-            metric(nums, "ACTUAL", prev == null ? "—" : n((f.odometer - prev.odometer) / f.liters) + " km/L");
-            if (f.estimate > 0) { addSpace(item, 11); item.addView(text("Estimated: " + n(f.estimate) + " km/L", 12, secondary, false)); }
-            addSpace(section, 10);
-        }
-    }
-
-    // ==========================================
-    // TAB 3: VEHICLE EXPENSES (FUEL + MISC)
-    // ==========================================
-    private void vehicleExpensesTabView(FuelDb.Vehicle vehicle) {
-        List<FuelDb.Fill> fills = db.fills(vehicle.id);
-        List<FuelDb.Expense> miscList = db.expenses(vehicle.id);
-
-        double totalFuelSpend = 0;
-        double totalMiscSpend = 0;
-
-        TreeMap<String, double[]> monthlyMap = new TreeMap<>();
-        SimpleDateFormat keyFmt = new SimpleDateFormat("yyyy-MM", Locale.US);
-        SimpleDateFormat labelFmt = new SimpleDateFormat("MMM yy", Locale.US);
-        TreeMap<String, String> monthLabels = new TreeMap<>();
-
-        for (FuelDb.Fill f : fills) {
-            totalFuelSpend += f.amount;
-            Date dObj = new Date(f.time);
-            String k = keyFmt.format(dObj);
-            monthLabels.put(k, labelFmt.format(dObj));
-            double[] arr = monthlyMap.get(k);
-            if (arr == null) { arr = new double[]{0, 0}; monthlyMap.put(k, arr); }
-            arr[0] += f.amount;
-        }
-        for (FuelDb.Expense e : miscList) {
-            totalMiscSpend += e.amount;
-            Date dObj = new Date(e.time);
-            String k = keyFmt.format(dObj);
-            monthLabels.put(k, labelFmt.format(dObj));
-            double[] arr = monthlyMap.get(k);
-            if (arr == null) { arr = new double[]{0, 0}; monthlyMap.put(k, arr); }
-            arr[1] += e.amount;
-        }
-
-        double grandTotal = totalFuelSpend + totalMiscSpend;
-
-        LinearLayout overview = card(root);
-        overview.addView(text("TOTAL VEHICLE EXPENSES", 12, secondary, true)); addSpace(overview, 10);
-        overview.addView(text("₹" + n(grandTotal), 31, accent, true)); addSpace(overview, 6);
-        overview.addView(text("Fuel: ₹" + n(totalFuelSpend) + "   ·   Misc: ₹" + n(totalMiscSpend), 13, secondary, false));
-
-        if (!monthlyMap.isEmpty()) {
-            addSpace(overview, 16);
-            overview.addView(text("MONTHLY VEHICLE EXPENSE BREAKDOWN", 12, secondary, true)); addSpace(overview, 10);
-
-            StringBuilder monthsJson = new StringBuilder("[");
-            StringBuilder fuelExpJson = new StringBuilder("[");
-            StringBuilder miscExpJson = new StringBuilder("[");
-
-            for (Map.Entry<String, double[]> entry : monthlyMap.entrySet()) {
-                if (monthsJson.length() > 1) {
-                    monthsJson.append(",");
-                    fuelExpJson.append(",");
-                    miscExpJson.append(",");
-                }
-                monthsJson.append("'").append(monthLabels.get(entry.getKey())).append("'");
-                fuelExpJson.append(String.format(Locale.US, "%.2f", entry.getValue()[0]));
-                miscExpJson.append(String.format(Locale.US, "%.2f", entry.getValue()[1]));
-            }
-            monthsJson.append("]");
-            fuelExpJson.append("]");
-            miscExpJson.append("]");
-
-            WebView expWeb = new WebView(this);
-            expWeb.setLayoutParams(lp(-1, 230));
-            WebSettings settings = expWeb.getSettings();
-            settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
-
-            String bgHex = dark ? "#1B2225" : "#FFFFFF";
-            String txtHex = dark ? "#A2B1B4" : "#64777D";
-            String accHex = dark ? "#65DCC7" : "#0D796A";
-
-            String html = "<!DOCTYPE html><html><head>" +
-                    "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
-                    "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>" +
-                    "<style>body { background-color: " + bgHex + "; margin: 0; padding: 0; } .box { position: relative; height: 220px; width: 100%; }</style>" +
-                    "</head><body><div class='box'><canvas id='ec'></canvas></div><script>" +
-                    "new Chart(document.getElementById('ec').getContext('2d'), {" +
-                    "  type: 'bar'," +
-                    "  data: {" +
-                    "    labels: " + monthsJson.toString() + "," +
-                    "    datasets: [" +
-                    "      { label: 'Fuel (₹)', data: " + fuelExpJson.toString() + ", backgroundColor: '" + accHex + "' }," +
-                    "      { label: 'Misc (₹)', data: " + miscExpJson.toString() + ", backgroundColor: '#f59e0b' }" +
-                    "    ]" +
-                    "  }," +
-                    "  options: {" +
-                    "    responsive: true, maintainAspectRatio: false," +
-                    "    plugins: { legend: { labels: { color: '" + txtHex + "', font: { size: 11 } } } }," +
-                    "    scales: { x: { stacked: true, ticks: { color: '" + txtHex + "', font: { size: 10 } } }, y: { stacked: true, ticks: { color: '" + txtHex + "', font: { size: 10 } } } }" +
-                    "  }" +
-                    "});" +
-                    "</script></body></html>";
-
-            expWeb.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
-            overview.addView(expWeb);
-        }
-        addSpace(root, 18);
-
-        LinearLayout form = card(root);
-        form.addView(text("Add vehicle misc expense", 20, primary, true)); addSpace(form, 6);
-        form.addView(text("Track maintenance, insurance, tolls, car wash, or accessories.", 13, secondary, false)); addSpace(form, 16);
-
-        form.addView(text("DATE OF EXPENSE", 12, secondary, true)); addSpace(form, 7);
-        Button expDateBtn = button(date(selectedExpenseDate), false);
-        expDateBtn.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-        expDateBtn.setPadding(d(14), 0, d(14), 0);
-        form.addView(expDateBtn, lp(-1, 50));
-        expDateBtn.setOnClickListener(v -> pickDate(selectedExpenseDate, millis -> {
-            selectedExpenseDate = millis;
-            expDateBtn.setText(date(selectedExpenseDate));
-        }));
-        addSpace(form, 14);
-
-        expTitleInput = input(form, "EXPENSE DESCRIPTION", "e.g. Oil Change / Insurance / Toll", "", false);
-        expAmountInput = input(form, "AMOUNT SPENT (₹)", "e.g. 1200", "", true);
-
-        Button saveExp = button("Save vehicle expense", true);
-        form.addView(saveExp, lp(-1, 49));
-        saveExp.setOnClickListener(v -> {
-            try {
-                String title = expTitleInput.getText().toString().trim();
-                if (title.isEmpty()) throw new IllegalArgumentException("Enter an expense description.");
-                double amt = number(expAmountInput, "amount spent", false);
-                db.addExpense(vehicle.id, selectedExpenseDate, title, amt);
-                selectedExpenseDate = System.currentTimeMillis();
-                toast("Vehicle expense saved"); render();
-            } catch (Exception e) {
-                alert(e.getMessage() == null ? "Could not save expense." : e.getMessage());
-            }
-        });
-        addSpace(root, 18);
-
-        LinearLayout section = col(); root.addView(section, lp(-1, -2));
-        LinearLayout heading = row(); section.addView(heading, lp(-1, -2));
-        heading.addView(text("Vehicle misc history", 20, primary, true), new LinearLayout.LayoutParams(0, -2, 1));
-        heading.addView(text(miscList.size() + " entries", 12, secondary, false)); addSpace(section, 12);
-
-        if (miscList.isEmpty()) {
-            LinearLayout empty = card(section);
-            empty.addView(text("No vehicle misc expenses yet", 15, primary, true)); addSpace(empty, 6);
-            empty.addView(text("Added expenses will appear here and sum into your vehicle total.", 13, secondary, false));
-            return;
-        }
-
-        for (FuelDb.Expense e : miscList) {
-            LinearLayout item = card(section);
-            LinearLayout titleRow = row(); item.addView(titleRow, lp(-1, -2));
-            LinearLayout left = col(); titleRow.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
-            left.addView(text(e.title, 15, primary, true)); addSpace(left, 4);
-            left.addView(text(date(e.time) + "  ·  ₹" + n(e.amount), 13, accent, true));
-
-            Button delete = button("Delete", false);
-            titleRow.addView(delete, lp(78, 42));
-            delete.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Delete expense?")
-                    .setMessage("Remove '" + e.title + "' (₹" + n(e.amount) + ")?")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Delete", (dialog, which) -> { db.deleteExpense(e.id); render(); }).show());
-            addSpace(section, 10);
-        }
     }
 
     private void metric(LinearLayout row, String label, String value) {
